@@ -26,6 +26,11 @@ type OpenAIAgenticProvider struct {
 	maxTokens int
 	name      string // "openai" | "ollama" (for attribution/pricing)
 	client    *http.Client
+
+	// retryPolicy controls how transient API errors (429, 529, 5xx, network)
+	// are retried, matching the Claude provider. Without it a stale-keep-alive
+	// EOF killed the turn outright (openai_retry.go).
+	retryPolicy RetryPolicy
 }
 
 // NewOpenAIAgenticProvider builds a provider. name distinguishes ollama vs
@@ -41,6 +46,7 @@ func NewOpenAIAgenticProvider(name, apiKey, apiURL, model string, maxTokens int)
 		name = "openai"
 	}
 	return &OpenAIAgenticProvider{
+		retryPolicy: DefaultRetryPolicy(),
 		apiKey: apiKey, apiURL: strings.TrimRight(apiURL, "/"), model: model,
 		maxTokens: maxTokens, name: name,
 		client: &http.Client{Timeout: 0},
@@ -114,10 +120,16 @@ type oaiTool struct {
 }
 
 type oaiRequest struct {
-	Model     string       `json:"model"`
-	Messages  []oaiMessage `json:"messages"`
-	Tools     []oaiTool    `json:"tools,omitempty"`
-	MaxTokens int          `json:"max_tokens,omitempty"`
+	Model    string       `json:"model"`
+	Messages []oaiMessage `json:"messages"`
+	Tools    []oaiTool    `json:"tools,omitempty"`
+	// Exactly one of these two carries the output cap — see setMaxTokens.
+	// OpenAI deprecated max_tokens on Chat Completions and its current models
+	// reject it outright (400 unsupported_parameter), while the other
+	// OpenAI-compatible servers rysh targets still only speak the original
+	// field. omitempty on both keeps the unused one off the wire.
+	MaxTokens           int `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
 	// Streaming fields (openai_streaming.go). StreamOptions asks the server to
 	// append a final usage chunk; only ever set alongside Stream=true.
 	Stream        bool              `json:"stream,omitempty"`
@@ -162,12 +174,51 @@ func (c *OpenAIAgenticProvider) buildRequest(conversation []ConversationTurn, to
 		}})
 	}
 
-	return oaiRequest{Model: c.model, Messages: msgs, Tools: oaiTools, MaxTokens: c.maxTokens}
+	r := oaiRequest{Model: c.model, Messages: msgs, Tools: oaiTools}
+	c.setMaxTokens(&r)
+	return r
 }
 
-// CompleteWithTools runs one Chat Completions turn with tool support.
+// setMaxTokens writes the output cap into whichever field this endpoint's
+// dialect accepts.
+//
+// OpenAI deprecated `max_tokens` on Chat Completions in favour of
+// `max_completion_tokens`, and its current models do not merely ignore the old
+// field — they reject the whole request with
+// `400 unsupported_parameter: 'max_tokens' is not supported with this model`.
+// The other OpenAI-compatible endpoints rysh drives (local Ollama, the Gemini
+// compat layer) still speak only the original field, so the choice is made per
+// provider family rather than switched globally: renaming it everywhere would
+// trade an OpenAI outage for an Ollama one, and air-gapped mode runs on Ollama.
+func (c *OpenAIAgenticProvider) setMaxTokens(r *oaiRequest) {
+	if c.maxTokens <= 0 {
+		return
+	}
+	if c.usesCompletionTokensField() {
+		r.MaxCompletionTokens = c.maxTokens
+		return
+	}
+	r.MaxTokens = c.maxTokens
+}
+
+// usesCompletionTokensField reports whether this endpoint wants the newer
+// `max_completion_tokens` spelling. Keyed on the provider family (the same
+// value that drives usage attribution), which is "openai" only for OpenAI
+// proper — Ollama and Gemini arrive under their own names.
+func (c *OpenAIAgenticProvider) usesCompletionTokensField() bool {
+	return strings.EqualFold(strings.TrimSpace(c.name), "openai")
+}
+
+// CompleteWithTools runs one turn with tool support, in whichever dialect this
+// endpoint speaks: OpenAI proper takes the Responses API (openai_responses.go),
+// every other OpenAI-compatible endpoint takes Chat Completions.
 func (c *OpenAIAgenticProvider) CompleteWithTools(ctx context.Context, conversation []ConversationTurn, tools []ToolSpec, systemPrompt string) (*AgenticResponse, error) {
-	return c.doComplete(ctx, c.buildRequest(conversation, tools, systemPrompt))
+	return c.withRetry(ctx, func(ctx context.Context) (*AgenticResponse, error) {
+		if c.usesResponsesAPI() {
+			return c.doResponses(ctx, c.buildResponsesRequest(conversation, tools, systemPrompt))
+		}
+		return c.doComplete(ctx, c.buildRequest(conversation, tools, systemPrompt))
+	})
 }
 
 // doComplete performs one non-streaming HTTP round trip for an assembled
@@ -195,7 +246,7 @@ func (c *OpenAIAgenticProvider) doComplete(ctx context.Context, reqBody oaiReque
 	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s: status %d: %s", c.name, resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return nil, newOpenAIHTTPError(c.name, "status", resp.StatusCode, resp.Header, string(respBody))
 	}
 
 	var out oaiResponse

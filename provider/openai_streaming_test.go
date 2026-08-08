@@ -23,6 +23,11 @@ func fakeOAISSE(payloads ...string) string {
 	return sb.String()
 }
 
+// The provider family in these tests is deliberately ollama/gemini rather than
+// openai: this file covers the CHAT COMPLETIONS streaming dialect, which is
+// what those endpoints speak. OpenAI proper streams the Responses API — see
+// openai_responses_streaming_test.go.
+
 // sseServer serves body for POST /chat/completions and captures the decoded
 // request into gotReq.
 func sseServer(t *testing.T, gotReq *oaiRequest, body string) *httptest.Server {
@@ -54,7 +59,7 @@ func TestOpenAIStream_TextAssemblesAndUsage(t *testing.T) {
 	))
 	defer srv.Close()
 
-	p := NewOpenAIAgenticProvider("openai", "k", srv.URL, "gpt-4o", 1024)
+	p := NewOpenAIAgenticProvider("gemini", "k", srv.URL, "gemini-2.5-flash", 1024)
 	var deltas []string
 	resp, err := p.CompleteWithToolsStream(context.Background(),
 		[]ConversationTurn{{Role: "user", Content: "hi"}}, nil, "sys",
@@ -194,7 +199,7 @@ func TestOpenAIStream_BadRequestDegradesToNonStreaming(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAIAgenticProvider("openai", "k", srv.URL, "gpt-4o", 0)
+	p := NewOpenAIAgenticProvider("ollama", "k", srv.URL, "llama3.1", 0)
 	resp, err := p.CompleteWithToolsStream(context.Background(),
 		[]ConversationTurn{{Role: "user", Content: "hi"}}, nil, "", nil)
 	if err != nil {

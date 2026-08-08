@@ -37,9 +37,12 @@ import (
 // capability detection (rysh-cli Caps()) reports Streaming=true.
 var _ StreamingProvider = (*OpenAIAgenticProvider)(nil)
 
-// CompleteWithToolsStream is the streaming equivalent of CompleteWithTools.
-// It sets stream=true (plus stream_options.include_usage) on the request body
-// and consumes the SSE response, invoking cb on each event and returning the
+// CompleteWithToolsStream is the streaming equivalent of CompleteWithTools,
+// and routes by dialect the same way it does: OpenAI proper streams from the
+// Responses API (openai_responses_streaming.go), every other
+// OpenAI-compatible endpoint streams Chat Completions from here. It sets
+// stream=true (plus stream_options.include_usage) on the request body and
+// consumes the SSE response, invoking cb on each event and returning the
 // assembled AgenticResponse once the stream completes.
 //
 // Setup failures degrade gracefully, in two steps. An HTTP 400 is the
@@ -59,8 +62,15 @@ func (c *OpenAIAgenticProvider) CompleteWithToolsStream(
 	systemPrompt string,
 	cb StreamCallback,
 ) (*AgenticResponse, error) {
-	return c.doStream(ctx, c.buildRequest(conversation, tools, systemPrompt), cb, func() (*AgenticResponse, error) {
-		return c.CompleteWithTools(ctx, conversation, tools, systemPrompt)
+	return c.withStreamRetry(ctx, cb, func(ctx context.Context, cb StreamCallback) (*AgenticResponse, error) {
+		if c.usesResponsesAPI() {
+			return c.doResponsesStream(ctx, c.buildResponsesRequest(conversation, tools, systemPrompt), cb, func() (*AgenticResponse, error) {
+				return c.doResponses(ctx, c.buildResponsesRequest(conversation, tools, systemPrompt))
+			})
+		}
+		return c.doStream(ctx, c.buildRequest(conversation, tools, systemPrompt), cb, func() (*AgenticResponse, error) {
+			return c.doComplete(ctx, c.buildRequest(conversation, tools, systemPrompt))
+		})
 	})
 }
 
@@ -131,7 +141,7 @@ func (c *OpenAIAgenticProvider) streamOnce(ctx context.Context, reqBody oaiReque
 			return nil, fmt.Errorf("%s: stream status 400: %s: %w",
 				c.name, strings.TrimSpace(string(respBody)), errStreamRejected)
 		}
-		return nil, fmt.Errorf("%s: stream status %d: %s", c.name, resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return nil, newOpenAIHTTPError(c.name, "stream status", resp.StatusCode, resp.Header, string(respBody))
 	}
 
 	return parseOpenAIStream(resp.Body, c.name, cb)

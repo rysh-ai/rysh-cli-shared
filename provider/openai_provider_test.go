@@ -10,7 +10,11 @@ import (
 	"testing"
 )
 
-func TestOpenAIProvider_CompleteWithTools(t *testing.T) {
+// TestOpenAICompatProvider_CompleteWithTools covers the CHAT COMPLETIONS
+// translation, so it runs as ollama: that dialect now serves Ollama and the
+// Gemini compat layer only, OpenAI proper having moved to the Responses API
+// (TestOpenAIProvider_CompleteWithTools_Responses is its counterpart).
+func TestOpenAICompatProvider_CompleteWithTools(t *testing.T) {
 	var gotReq oaiRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
@@ -30,7 +34,7 @@ func TestOpenAIProvider_CompleteWithTools(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAIAgenticProvider("openai", "k", srv.URL, "gpt-4o", 1024)
+	p := NewOpenAIAgenticProvider("ollama", "k", srv.URL, "llama3.1", 1024)
 	tools := []ToolSpec{{Name: "file_read", Description: "read a file", Parameters: json.RawMessage(`{"type":"object"}`)}}
 	conv := []ConversationTurn{{Role: "user", Content: "read a.go"}}
 
@@ -40,7 +44,7 @@ func TestOpenAIProvider_CompleteWithTools(t *testing.T) {
 	}
 
 	// Request translation.
-	if gotReq.Model != "gpt-4o" || len(gotReq.Messages) != 2 {
+	if gotReq.Model != "llama3.1" || len(gotReq.Messages) != 2 {
 		t.Fatalf("req model=%q msgs=%d", gotReq.Model, len(gotReq.Messages))
 	}
 	if gotReq.Messages[0].Role != "system" || gotReq.Messages[1].Role != "user" {

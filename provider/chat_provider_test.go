@@ -41,6 +41,19 @@ func captureServer(bodies *[][]byte, contentType, body string) *httptest.Server 
 	}))
 }
 
+// pathCaptureServer is captureServer plus the request PATH, for the tests that
+// pin which endpoint a provider family talks to (Chat Completions vs the
+// Responses API) alongside what it sends.
+func pathCaptureServer(bodies *[][]byte, paths *[]string, contentType, body string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		*bodies = append(*bodies, raw)
+		*paths = append(*paths, r.URL.Path)
+		w.Header().Set("Content-Type", contentType)
+		_, _ = io.WriteString(w, body)
+	}))
+}
+
 var chatTestTools = []ToolSpec{
 	{Name: "bash", Description: "run a command", Parameters: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}}}`)},
 	{Name: "file_read", Description: "read a file", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`)},
@@ -166,11 +179,21 @@ const oaiJSONBody = `{"object":"chat.completion","choices":[{"index":0,"message"
 	`"content":"done","tool_calls":[{"id":"call_9","type":"function","function":{"name":"bash","arguments":"{\"command\":\"ls\"}"}}]},` +
 	`"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":21,"completion_tokens":4}}`
 
+// responsesJSONBody is oaiJSONBody's Responses-dialect twin — same text, same
+// tool call, same token counts — plus a leading reasoning item, which the
+// mapping must skip rather than surface as an empty block.
+const responsesJSONBody = `{"id":"resp_1","object":"response","status":"completed","output":[` +
+	`{"id":"rs_1","type":"reasoning","summary":[]},` +
+	`{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"done"}]},` +
+	`{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_9","name":"bash","arguments":"{\"command\":\"ls\"}"}],` +
+	`"usage":{"input_tokens":21,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":2},` +
+	`"output_tokens":4,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":25}}`
+
 // TestChatAdapter_OpenAI_RequestBytesIdentical: same byte-identity proof for
 // the OpenAI-compatible provider (openai/ollama/gemini dialect).
 func TestChatAdapter_OpenAI_RequestBytesIdentical(t *testing.T) {
 	var bodies [][]byte
-	srv := captureServer(&bodies, "application/json", oaiJSONBody)
+	srv := captureServer(&bodies, "application/json", responsesJSONBody)
 	defer srv.Close()
 
 	p := NewOpenAIAgenticProvider("openai", "k", srv.URL, "gpt-x", 512)

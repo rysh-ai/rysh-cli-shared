@@ -1,15 +1,19 @@
 package provider
 
 // Design 002 A1 (final step) — the native OpenAI-compatible ChatProvider
-// implementation (openai / ollama / gemini dialect). Chat/ChatStream
-// translate neutral Turn/Block history straight to Chat Completions
-// messages; ConversationTurn never appears in this path. The wire bytes are
-// BYTE-IDENTICAL to the compat-adapter path (ConversationFromTurns ->
-// buildRequest) for every expressible ChatRequest: flattenTurns reproduces
-// the same message fan-out, and unitToOAI mirrors turnToOAI's per-message
-// mapping (including its lossy drops — thinking blocks, attachments — which
-// this dialect has never carried). Pinned by the differential tests in
-// chat_native_test.go.
+// implementation (openai / ollama / gemini). Chat/ChatStream translate neutral
+// Turn/Block history straight to the wire; ConversationTurn never appears in
+// this path. The wire bytes are BYTE-IDENTICAL to the compat-adapter path
+// (ConversationFromTurns -> the shim builders) for every expressible
+// ChatRequest: flattenTurns reproduces the same message fan-out, and the unit
+// emitters mirror their shim counterparts' per-message mapping (including the
+// lossy drops — thinking blocks, attachments — neither dialect has ever
+// carried). Pinned by the differential tests in chat_native_test.go.
+//
+// Two dialects live behind this one type, and the ROUTING must match
+// CompleteWithTools exactly or the two paths diverge: OpenAI proper speaks the
+// Responses API (openai_responses.go, unitToResponses), Ollama and the Gemini
+// compat layer speak Chat Completions (buildTurnRequest, unitToOAI).
 
 import (
 	"context"
@@ -20,28 +24,43 @@ import (
 // Claude counterpart for the embedding-bypass rationale.
 func (c *OpenAIAgenticProvider) nativeChatSelf() ChatProvider { return c }
 
-// Chat implements ChatProvider natively: neutral turns -> Chat Completions
-// request -> neutral response. Per-request Model/MaxTokens overrides route
-// through the same seams (and error semantics) as the adapter path.
+// Chat implements ChatProvider natively: neutral turns -> wire request ->
+// neutral response, in whichever dialect this endpoint speaks (OpenAI proper
+// takes Responses, every other OpenAI-compatible endpoint takes Chat
+// Completions — the same split CompleteWithTools applies, so the two paths do
+// not diverge). Per-request Model/MaxTokens overrides route through the same
+// seams (and error semantics) as the adapter path.
 func (c *OpenAIAgenticProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	cc, err := c.chatRequestTarget(req)
 	if err != nil {
 		return nil, err
 	}
-	ar, err := cc.doComplete(ctx, cc.buildTurnRequest(req.Turns, req.Tools, req.System))
+	ar, err := cc.withRetry(ctx, func(ctx context.Context) (*AgenticResponse, error) {
+		if cc.usesResponsesAPI() {
+			return cc.doResponses(ctx, cc.buildTurnResponsesRequest(req.Turns, req.Tools, req.System))
+		}
+		return cc.doComplete(ctx, cc.buildTurnRequest(req.Turns, req.Tools, req.System))
+	})
 	return ChatResponseFromAgentic(ar), err
 }
 
 // ChatStream implements ChatProvider natively; SSE consumption, the
 // StreamEvent sequence, and the HTTP 400 non-streaming degradation are the
-// same code path CompleteWithToolsStream uses.
+// same code paths CompleteWithToolsStream uses, per dialect.
 func (c *OpenAIAgenticProvider) ChatStream(ctx context.Context, req ChatRequest, cb StreamCallback) (*ChatResponse, error) {
 	cc, err := c.chatRequestTarget(req)
 	if err != nil {
 		return nil, err
 	}
-	ar, err := cc.doStream(ctx, cc.buildTurnRequest(req.Turns, req.Tools, req.System), cb, func() (*AgenticResponse, error) {
-		return cc.doComplete(ctx, cc.buildTurnRequest(req.Turns, req.Tools, req.System))
+	ar, err := cc.withStreamRetry(ctx, cb, func(ctx context.Context, cb StreamCallback) (*AgenticResponse, error) {
+		if cc.usesResponsesAPI() {
+			return cc.doResponsesStream(ctx, cc.buildTurnResponsesRequest(req.Turns, req.Tools, req.System), cb, func() (*AgenticResponse, error) {
+				return cc.doResponses(ctx, cc.buildTurnResponsesRequest(req.Turns, req.Tools, req.System))
+			})
+		}
+		return cc.doStream(ctx, cc.buildTurnRequest(req.Turns, req.Tools, req.System), cb, func() (*AgenticResponse, error) {
+			return cc.doComplete(ctx, cc.buildTurnRequest(req.Turns, req.Tools, req.System))
+		})
 	})
 	return ChatResponseFromAgentic(ar), err
 }
@@ -83,7 +102,9 @@ func (c *OpenAIAgenticProvider) buildTurnRequest(turns []Turn, tools []ToolSpec,
 		}})
 	}
 
-	return oaiRequest{Model: c.model, Messages: msgs, Tools: oaiTools, MaxTokens: c.maxTokens}
+	r := oaiRequest{Model: c.model, Messages: msgs, Tools: oaiTools}
+	c.setMaxTokens(&r)
+	return r
 }
 
 // unitToOAI converts one wire unit to an OpenAI message — the native mirror

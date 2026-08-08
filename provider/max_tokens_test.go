@@ -25,6 +25,26 @@ func wireMaxTokens(t *testing.T, body []byte) int {
 	return sent.MaxTokens
 }
 
+// wireOutputCap decodes ALL THREE output-cap spellings from a captured body.
+// OpenAI proper speaks the Responses API and sends max_output_tokens; Ollama
+// and the Gemini compat layer speak Chat Completions and send max_tokens; the
+// middle spelling, max_completion_tokens, is Chat Completions' newer field and
+// must now never go out at all (OpenAI was its only user and has moved off that
+// endpoint). Returning all three lets a test assert that exactly one went out —
+// sending the wrong one is a 400 on every endpoint here.
+func wireOutputCap(t *testing.T, body []byte) (maxTokens, maxCompletionTokens, maxOutputTokens int) {
+	t.Helper()
+	var sent struct {
+		MaxTokens           int `json:"max_tokens"`
+		MaxCompletionTokens int `json:"max_completion_tokens"`
+		MaxOutputTokens     int `json:"max_output_tokens"`
+	}
+	if err := json.Unmarshal(body, &sent); err != nil {
+		t.Fatalf("decode captured body: %v", err)
+	}
+	return sent.MaxTokens, sent.MaxCompletionTokens, sent.MaxOutputTokens
+}
+
 var maxTokensTestTurns = []Turn{{Role: RoleUser, Blocks: []Block{{Kind: BlockKindText, Text: "hi"}}}}
 
 // seamForwardingAgentic hides ChatProvider (forcing AsChatProvider onto the
@@ -164,18 +184,21 @@ func TestChatRequest_MaxTokens_OpenAI(t *testing.T) {
 	srv := captureServer(&bodies, "application/json", oaiJSONBody)
 	defer srv.Close()
 
+	// OpenAI proper: the cap must ride the Responses API's max_output_tokens,
+	// with both Chat Completions spellings ABSENT — that endpoint accepts
+	// neither.
 	p := NewOpenAIAgenticProvider("openai", "k", srv.URL, "gpt-x", 512)
 	if _, err := AsChatProvider(p).Chat(ctx, ChatRequest{Turns: maxTokensTestTurns, MaxTokens: 777}); err != nil {
 		t.Fatalf("chat with MaxTokens: %v", err)
 	}
-	if got := wireMaxTokens(t, bodies[0]); got != 777 {
-		t.Errorf("wire max_tokens = %d, want 777", got)
+	if mt, mct, mot := wireOutputCap(t, bodies[0]); mt != 0 || mct != 0 || mot != 777 {
+		t.Errorf("openai wire = max_tokens %d / max_completion_tokens %d / max_output_tokens %d, want 0 / 0 / 777", mt, mct, mot)
 	}
 	if _, err := AsChatProvider(p).Chat(ctx, ChatRequest{Turns: maxTokensTestTurns}); err != nil {
 		t.Fatalf("chat without MaxTokens: %v", err)
 	}
-	if got := wireMaxTokens(t, bodies[1]); got != 512 {
-		t.Errorf("default wire max_tokens = %d, want 512", got)
+	if mt, mct, mot := wireOutputCap(t, bodies[1]); mt != 0 || mct != 0 || mot != 512 {
+		t.Errorf("openai default wire = max_tokens %d / max_completion_tokens %d / max_output_tokens %d, want 0 / 0 / 512", mt, mct, mot)
 	}
 
 	sse := fakeOAISSE(
@@ -203,5 +226,75 @@ func TestChatRequest_MaxTokens_OpenAI(t *testing.T) {
 	}
 	if got := wireMaxTokens(t, streamBodies[1]); got != 256 {
 		t.Errorf("default stream max_tokens = %d, want 256", got)
+	}
+}
+
+// TestOutputCapFieldPerFamily pins the per-family wire split, endpoint and cap
+// field together. It began as a two-way split when current OpenAI models
+// started rejecting max_tokens outright (400 unsupported_parameter); those
+// models then also refused function tools on Chat Completions, which moved
+// OpenAI proper to the Responses API and its third spelling.
+//
+// OpenAI proper: POST /responses, max_output_tokens, neither Chat Completions
+// spelling. Ollama and the Gemini compat layer: POST /chat/completions,
+// max_tokens — they know neither newer field, and Ollama is what air-gapped
+// mode runs on. Getting this wrong is a 400 on every endpoint involved.
+func TestOutputCapFieldPerFamily(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		family              string
+		wantPath            string
+		wantMaxTokens       int
+		wantCompletionField int
+		wantOutputField     int
+	}{
+		{"openai", "/responses", 0, 0, 640},
+		{"ollama", "/chat/completions", 640, 0, 0},
+		{"gemini", "/chat/completions", 640, 0, 0},
+		{"OpenAI", "/responses", 0, 0, 640}, // family match is case-insensitive
+	} {
+		t.Run(tc.family, func(t *testing.T) {
+			var bodies [][]byte
+			var paths []string
+			srv := pathCaptureServer(&bodies, &paths, "application/json", oaiJSONBody)
+			defer srv.Close()
+
+			p := NewOpenAIAgenticProvider(tc.family, "k", srv.URL, "m", 640)
+			if _, err := AsChatProvider(p).Chat(ctx, ChatRequest{Turns: maxTokensTestTurns}); err != nil {
+				t.Fatalf("chat: %v", err)
+			}
+			if paths[0] != tc.wantPath {
+				t.Errorf("%s posted to %q, want %q", tc.family, paths[0], tc.wantPath)
+			}
+			mt, mct, mot := wireOutputCap(t, bodies[0])
+			if mt != tc.wantMaxTokens || mct != tc.wantCompletionField || mot != tc.wantOutputField {
+				t.Errorf("%s wire = max_tokens %d / max_completion_tokens %d / max_output_tokens %d, want %d / %d / %d",
+					tc.family, mt, mct, mot, tc.wantMaxTokens, tc.wantCompletionField, tc.wantOutputField)
+			}
+		})
+	}
+}
+
+// TestOutputCapOmittedWhenUnset: with no cap configured, neither field goes out
+// — an explicit zero would be rejected by both dialects.
+func TestOutputCapOmittedWhenUnset(t *testing.T) {
+	var bodies [][]byte
+	srv := captureServer(&bodies, "application/json", oaiJSONBody)
+	defer srv.Close()
+
+	// maxTokens <= 0 is normalized to the 4096 default by the constructor, so
+	// drive the zero case through the struct the constructor produces.
+	p := NewOpenAIAgenticProvider("openai", "k", srv.URL, "m", 1)
+	capped, ok := p.WithMaxTokens(0).(*OpenAIAgenticProvider)
+	if !ok {
+		t.Fatal("WithMaxTokens(0) did not return an *OpenAIAgenticProvider")
+	}
+	capped.maxTokens = 0
+	if _, err := AsChatProvider(capped).Chat(context.Background(), ChatRequest{Turns: maxTokensTestTurns}); err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if mt, mct, mot := wireOutputCap(t, bodies[0]); mt != 0 || mct != 0 || mot != 0 {
+		t.Errorf("unset cap wire = max_tokens %d / max_completion_tokens %d / max_output_tokens %d, want 0 / 0 / 0", mt, mct, mot)
 	}
 }

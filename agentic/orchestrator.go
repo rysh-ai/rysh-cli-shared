@@ -696,13 +696,13 @@ func (o *OrchestratorActor) runLoop(ctx actor.Context) {
 			o.phase = PhaseDone
 			// Append assistant response to conversation
 			if assistantContent.Len() > 0 {
-				o.conversation = append(o.conversation, provider.ConversationTurn{
+				o.conversation = append(o.conversation, o.stampAttribution(provider.ConversationTurn{
 					Role:        "assistant",
 					Content:     assistantContent.String(),
 					Category:    provider.TurnCategoryAI,
 					TimestampMs: time.Now().UnixMilli(),
 					Thinking:    resp.ThinkingBlocks,
-				})
+				}))
 			}
 			return
 		}
@@ -710,14 +710,14 @@ func (o *OrchestratorActor) runLoop(ctx actor.Context) {
 		// Process tool calls
 		if len(resp.ToolCalls) > 0 {
 			// Build assistant turn with tool calls
-			assistantTurn := provider.ConversationTurn{
+			assistantTurn := o.stampAttribution(provider.ConversationTurn{
 				Role:        "assistant",
 				Content:     assistantContent.String(),
 				ToolCalls:   make([]provider.ToolCallRequest, len(resp.ToolCalls)),
 				Category:    provider.TurnCategoryAI,
 				TimestampMs: time.Now().UnixMilli(),
 				Thinking:    resp.ThinkingBlocks,
-			}
+			})
 			for i, tc := range resp.ToolCalls {
 				assistantTurn.ToolCalls[i] = provider.ToolCallRequest{
 					ID:    tc.ID,
@@ -765,13 +765,13 @@ func (o *OrchestratorActor) runLoop(ctx actor.Context) {
 		} else if resp.StopReason == provider.StopReasonMaxTokens {
 			// Max tokens - append what we have and continue
 			if assistantContent.Len() > 0 {
-				o.conversation = append(o.conversation, provider.ConversationTurn{
+				o.conversation = append(o.conversation, o.stampAttribution(provider.ConversationTurn{
 					Role:        "assistant",
 					Content:     assistantContent.String(),
 					Category:    provider.TurnCategoryAI,
 					TimestampMs: time.Now().UnixMilli(),
 					Thinking:    resp.ThinkingBlocks,
-				})
+				}))
 			}
 			o.emitOutput("text", "\n[Response truncated, continuing...]\n")
 		}
@@ -813,11 +813,16 @@ func pausedStepTitle(reason string) string {
 // incremental prompt cache keeps hitting across rounds (the provider places
 // its trailing cache breakpoint on the last STORED message for this reason).
 func (o *OrchestratorActor) requestConversation() []provider.ConversationTurn {
+	// Model hand-offs first: `##llm select` can swap the provider mid-run, and
+	// the incoming model must be told which assistant turns it did NOT write
+	// before it reads them (turn_model.go). Inserted on the outgoing copy only,
+	// so the stored transcript stays what each model actually said.
+	conv := insertModelSwitchNotes(o.conversation, o.activeAttribution())
 	if o.latestScreenshot == nil {
-		return o.conversation
+		return conv
 	}
-	out := make([]provider.ConversationTurn, len(o.conversation), len(o.conversation)+1)
-	copy(out, o.conversation)
+	out := make([]provider.ConversationTurn, len(conv), len(conv)+1)
+	copy(out, conv)
 	out = append(out, provider.ConversationTurn{
 		Role:          "user",
 		Content:       "[current page screenshot — the live state after the tool results above]",
@@ -845,7 +850,9 @@ func (o *OrchestratorActor) requestConversation() []provider.ConversationTurn {
 func (o *OrchestratorActor) callProvider(providerSpecs []provider.ToolSpec) (resp *provider.AgenticResponse, streamed bool, err error) {
 	chat := provider.AsChatProvider(o.prov)
 	req := provider.ChatRequest{
-		System: o.systemPrompt,
+		// Composed per call: it names the model serving THIS request, which
+		// `##llm select` can change mid-conversation (turn_model.go).
+		System: o.requestSystemPrompt(),
 		Turns:  provider.TurnsFromConversation(o.requestConversation()),
 		Tools:  providerSpecs,
 	}
@@ -1455,6 +1462,9 @@ func (o *OrchestratorActor) emitOutput(outputType, content string) {
 	})
 
 	// Emit via the unified ConversationMessage format to pane output topics.
+	// Attributed so the pane's stored JSON says which model answered, not just
+	// that "the ai" did (turn_model.go).
+	attr := o.activeAttribution()
 	cm := &msg.ConversationMessage{
 		TurnID:           o.id,
 		TurnType:         msg.TurnAnswer,
@@ -1464,6 +1474,8 @@ func (o *OrchestratorActor) emitOutput(outputType, content string) {
 		Content:          content,
 		TimestampMs:      msg.NowMs(),
 		SubjectToShare:   true,
+		ProviderName:     attr.providerName,
+		Model:            attr.model,
 	}
 
 	if o.pipelineOutputSubject != "" {
@@ -1496,6 +1508,7 @@ func toolCallHeaderLine(line string, atLineStart bool) string {
 
 // emitConversationOutput publishes output using the unified ConversationMessage format.
 func (o *OrchestratorActor) emitConversationOutput(content string, streaming bool) {
+	attr := o.activeAttribution()
 	cm := &msg.ConversationMessage{
 		TurnID:           o.id,
 		TurnType:         msg.TurnAnswer,
@@ -1506,6 +1519,8 @@ func (o *OrchestratorActor) emitConversationOutput(content string, streaming boo
 		TimestampMs:      msg.NowMs(),
 		Streaming:        streaming,
 		SubjectToShare:   true,
+		ProviderName:     attr.providerName,
+		Model:            attr.model,
 	}
 
 	if o.chatOutputPaneID != "" {
