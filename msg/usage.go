@@ -25,8 +25,13 @@ const (
 // a usage block exists). CostMicroUSD is computed at record time from the
 // pricing table; 0 (with a set model) means the model was not priced.
 type MsgUsageRecord struct {
-	PaneID       string    `json:"pane_id"`
-	AgentName    string    `json:"agent_name,omitempty"`
+	PaneID    string `json:"pane_id"`
+	AgentName string `json:"agent_name,omitempty"`
+	// Tenant attributes this record to a customer as well as a pane
+	// (design 022 §4.3). It is a SECOND INDEX over the same record, never a
+	// second record: session totals are summed from the pane rollup only, so
+	// tenant accounting cannot double-count `##cost`. Empty ⇒ untenanted.
+	Tenant       string    `json:"tenant,omitempty"`
 	Provider     string    `json:"provider"`
 	Model        string    `json:"model,omitempty"`
 	Source       string    `json:"source"`
@@ -42,6 +47,10 @@ type MsgUsageRecord struct {
 // usage.check request/reply subject. Callers cache the reply ~2s.
 type MsgUsageCheck struct {
 	PaneID string `json:"pane_id"`
+	// Tenant, when set, asks the ledger to check the TENANT's ceiling as well
+	// as the pane's (design 022 §4.3). The stricter of the two binds: a pane
+	// with headroom under a tenant that is out of budget must still be refused.
+	Tenant string `json:"tenant,omitempty"`
 }
 
 // MsgUsageCheckReply reports the pane's spend against its ceiling. CeilingTokens
@@ -51,7 +60,20 @@ type MsgUsageCheckReply struct {
 	SpentTokens   int64  `json:"spent_tokens"`
 	CeilingTokens int64  `json:"ceiling_tokens"`
 	Ok            bool   `json:"ok"`
+	// Scope names which ceiling the figures above describe: "" or "pane" for
+	// the pane's own, "tenant" when the tenant's ceiling is the binding one.
+	// Without it the refusal message would name the wrong budget and point the
+	// operator at the wrong command.
+	Scope string `json:"scope,omitempty"`
+	// Tenant echoes the tenant the check was made for, when Scope == "tenant".
+	Tenant string `json:"tenant,omitempty"`
 }
+
+// Usage check scopes.
+const (
+	UsageScopePane   = "pane"
+	UsageScopeTenant = "tenant"
+)
 
 // MsgUsageSnapshotRequest asks the UsageActor for aggregates. Window is
 // "today" (default) or "week".

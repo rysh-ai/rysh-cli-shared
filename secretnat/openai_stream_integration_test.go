@@ -18,7 +18,9 @@ import (
 // streaming — this is the check that "the code exists" and "a user gets
 // streaming" are the same statement.
 
-// oaiStreamServer serves a fixed Chat Completions SSE response.
+// oaiStreamServer serves a fixed SSE response in the dialect OpenAI proper
+// actually streams: the Responses API, whose stream is typed events ending in
+// response.completed rather than chat.completion.chunks ending in [DONE].
 func oaiStreamServer(t *testing.T, seen *string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -28,9 +30,12 @@ func oaiStreamServer(t *testing.T, seen *string) *httptest.Server {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		for _, f := range []string{
-			`{"choices":[{"index":0,"delta":{"content":"hel"}}]}`,
-			`{"choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":"stop"}]}`,
-			`[DONE]`,
+			`{"type":"response.created","sequence_number":0}`,
+			`{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","status":"in_progress","role":"assistant","content":[]}}`,
+			`{"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_1","delta":"hel"}`,
+			`{"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_1","delta":"lo"}`,
+			`{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}`,
+			`{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"id":"msg_1","type":"message","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":3,"output_tokens":2}}}`,
 		} {
 			_, _ = io.WriteString(w, "data: "+f+"\n\n")
 		}

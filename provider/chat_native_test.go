@@ -259,10 +259,12 @@ func TestNativeChatStream_Claude_Differential(t *testing.T) {
 }
 
 // TestNativeChat_OpenAI_Differential: byte-identical wire bodies and
-// identical responses for the OpenAI-compatible dialect.
+// identical responses for OpenAI proper, which speaks the Responses API. The
+// native path and the adapter path must pick the SAME dialect — routing one of
+// them to Chat Completions is exactly the divergence this catches.
 func TestNativeChat_OpenAI_Differential(t *testing.T) {
 	var bodies [][]byte
-	srv := captureServer(&bodies, "application/json", oaiJSONBody)
+	srv := captureServer(&bodies, "application/json", responsesJSONBody)
 	defer srv.Close()
 
 	for corpusName, turns := range map[string][]Turn{
@@ -319,7 +321,7 @@ func TestNativeChat_Differential_Randomized(t *testing.T) {
 	var claudeBodies, oaiBodies [][]byte
 	claudeSrv := captureServer(&claudeBodies, "application/json", claudeJSONBody)
 	defer claudeSrv.Close()
-	oaiSrv := captureServer(&oaiBodies, "application/json", oaiJSONBody)
+	oaiSrv := captureServer(&oaiBodies, "application/json", responsesJSONBody)
 	defer oaiSrv.Close()
 
 	claude := NewClaudeAgenticProvider("k", claudeSrv.URL, "claude-x", 0)

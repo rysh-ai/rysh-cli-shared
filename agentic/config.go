@@ -15,8 +15,10 @@ type AgentConfig struct {
 	// Defaults to "https://api.anthropic.com" if empty.
 	APIURL string
 
-	// DefaultModel is the Claude model name to use.
-	// Defaults to "claude-sonnet-4-20250514" if empty.
+	// DefaultModel is the model name to use.
+	// Empty means the provider's own default (provider.DefaultClaudeModel);
+	// this comment used to name a dated model id that the API has since
+	// retired, which is exactly why the value is not repeated here.
 	DefaultModel string
 
 	// MaxTokens is the maximum number of tokens per response.

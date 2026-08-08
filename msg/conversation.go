@@ -107,6 +107,33 @@ type ConversationMessage struct {
 	// tab/pane's output being mirrored into a local (subscriber) pane, so the
 	// content is traceable back to its source. Nil for normal local messages.
 	Origin *MessageOrigin `json:"origin,omitempty"`
+
+	// ProviderName / Model record WHICH model produced an answer. MessageSource
+	// says "ai"; these say which one — the distinction that matters once
+	// `##llm select` can change the model mid-conversation, leaving a pane whose
+	// stored turns were written by two different models with nothing in the JSON
+	// to tell them apart. Empty on questions, and on answers recorded before
+	// this existed.
+	//
+	// The provider-facing twin is ConversationTurn.ProviderName/Model; this is
+	// the display/persistence side, so a reader of the pane's history can
+	// attribute a turn without replaying the agentic loop.
+	ProviderName string `json:"provider_name,omitempty"`
+	Model        string `json:"model,omitempty"`
+}
+
+// Attribution renders an answer's producer for display, e.g. "openai
+// (gpt-5.6-luna)". Empty when the message carries no attribution.
+func (m ConversationMessage) Attribution() string {
+	switch {
+	case m.ProviderName == "" && m.Model == "":
+		return ""
+	case m.Model == "":
+		return m.ProviderName
+	case m.ProviderName == "":
+		return m.Model
+	}
+	return m.ProviderName + " (" + m.Model + ")"
 }
 
 // MessageOrigin describes where a mirrored message came from and which local

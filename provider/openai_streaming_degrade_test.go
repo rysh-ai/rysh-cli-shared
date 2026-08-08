@@ -154,7 +154,7 @@ func TestOpenAIStream_TextAndToolIndicesDoNotCollide(t *testing.T) {
 	))
 	defer srv.Close()
 
-	p := NewOpenAIAgenticProvider("openai", "k", srv.URL, "gpt-4o", 1024)
+	p := NewOpenAIAgenticProvider("ollama", "k", srv.URL, "llama3.1", 1024)
 	textIdx, toolIdx := -1, -2
 	_, err := p.CompleteWithToolsStream(context.Background(),
 		[]ConversationTurn{{Role: "user", Content: "go"}}, nil, "",
@@ -186,7 +186,7 @@ func TestOpenAIStream_SkipsUnparseableFrames(t *testing.T) {
 	))
 	defer srv.Close()
 
-	p := NewOpenAIAgenticProvider("openai", "k", srv.URL, "gpt-4o", 1024)
+	p := NewOpenAIAgenticProvider("ollama", "k", srv.URL, "llama3.1", 1024)
 	resp, err := p.CompleteWithToolsStream(context.Background(),
 		[]ConversationTurn{{Role: "user", Content: "hi"}}, nil, "", nil)
 	if err != nil {

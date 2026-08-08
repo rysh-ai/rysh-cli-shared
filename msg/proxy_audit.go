@@ -26,23 +26,45 @@ const (
 	// ProxyBudgetExceeded — the request was refused at the proxy because the
 	// pane was over its ceiling; no upstream call was made.
 	ProxyBudgetExceeded = "exceeded"
+	// ProxyBudgetRateLimited — the request was refused at the proxy because it
+	// breached a request-RATE rule (design 022 §4.2), not a token ceiling; no
+	// upstream call was made. Distinct from "exceeded" because the operator
+	// response differs: a ceiling means stop spending, a rate limit means slow
+	// down.
+	ProxyBudgetRateLimited = "rate_limited"
+	// ProxyBlocked — the request was refused at the proxy by a RULE rather than
+	// by a quantity: a model the operator has not allowed (design 001 §4.7), or
+	// a pane segment that names no live pane. Distinct from the two above
+	// because there is nothing to wait for — retrying the identical request
+	// will be refused identically, and an operator reading the trail needs to
+	// see a policy decision as a policy decision.
+	ProxyBlocked = "blocked"
 )
 
 // MsgProxyRequestAudit is a metadata-only record of one proxied request
 // (design 001 §4.5). Token counts are the provider's own reported numbers when
 // present. It NEVER carries request/response bodies.
 type MsgProxyRequestAudit struct {
-	PaneID        string    `json:"pane_id"`
-	Dialect       string    `json:"dialect"`             // anthropic | openai | gemini
-	Model         string    `json:"model,omitempty"`     // provider-reported model, if known
-	Endpoint      string    `json:"endpoint"`            // upstream path, or "(budget)" for a refusal
-	ReqBytes      int       `json:"req_bytes"`           // size of the (redacted) request body
-	RedactionHits int       `json:"redaction_hits"`      // secrets SNAT redacted before forwarding
-	BudgetState   string    `json:"budget_state"`        // ok | exceeded
-	Status        int       `json:"status"`              // upstream HTTP status, or 429 for a refusal
-	InTokens      int       `json:"in_tokens,omitempty"` // provider-reported input tokens
-	OutTokens     int       `json:"out_tokens,omitempty"`
-	TS            time.Time `json:"ts"`
+	PaneID        string `json:"pane_id"`
+	Dialect       string `json:"dialect"`             // anthropic | openai | gemini
+	Model         string `json:"model,omitempty"`     // provider-reported model, if known
+	Endpoint      string `json:"endpoint"`            // upstream path, or "(budget)"/"(model)"/"(unknown-pane)" for a refusal
+	ReqBytes      int    `json:"req_bytes"`           // size of the (redacted) request body
+	RedactionHits int    `json:"redaction_hits"`      // secrets SNAT redacted before forwarding
+	BudgetState   string `json:"budget_state"`        // ok | exceeded | rate_limited | blocked
+	Status        int    `json:"status"`              // upstream HTTP status, or 429 for a refusal
+	InTokens      int    `json:"in_tokens,omitempty"` // provider-reported input tokens
+	OutTokens     int    `json:"out_tokens,omitempty"`
+	// Upstream is the base URL that actually served the request and Attempts
+	// how many it took (1, or absent, = no failover). Added by design 022 §4.1;
+	// both are optional so records written before failover existed still decode.
+	Upstream string `json:"upstream,omitempty"`
+	Attempts int    `json:"attempts,omitempty"`
+	// Tenant attributes the request to a customer (design 022 §4.3), so the
+	// durable trail can be sliced per customer — which for a reseller is the
+	// entire point of tenanting. Optional: records predating it still decode.
+	Tenant string    `json:"tenant,omitempty"`
+	TS     time.Time `json:"ts"`
 }
 
 // MsgProxyAuditSnapshotRequest asks the ProxyAuditActor for the most recent

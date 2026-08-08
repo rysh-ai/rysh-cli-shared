@@ -199,5 +199,8 @@ func DefaultCodecRegistry() *CodecRegistry {
 	// Governance-proxy audit plane (design 001 §4.5)
 	RegisterProxyAuditCodecs(r)
 
+	// LLM gateway control plane (design 023)
+	RegisterGatewayCodecs(r)
+
 	return r
 }

@@ -13,13 +13,18 @@ import (
 	"time"
 )
 
-const (
-	anthropicVersion = "2023-06-01"
-	// defaultModel is the model used when the host doesn't configure one.
-	// claude-opus-4-8 is the current Opus-tier alias (un-dated; date-suffixed
-	// IDs like claude-sonnet-4-20250514 are deprecated and retire mid-2026).
-	defaultModel = "claude-opus-4-8"
-)
+const anthropicVersion = "2023-06-01"
+
+// DefaultClaudeModel is the model used when the host doesn't configure one.
+// claude-opus-4-8 is the current Opus-tier alias (un-dated; date-suffixed IDs
+// like claude-sonnet-4-20250514 are deprecated — that one already 404s).
+//
+// Exported because every host used to carry its OWN copy of this string, and
+// copies rot at different rates: rysh-server sat on claude-opus-4-5 long after
+// the engine had moved on, and AgentConfig's doc comment still advertised a
+// model the API no longer serves. Hosts that want "whatever the engine
+// defaults to" must be able to SAY that rather than re-type it.
+const DefaultClaudeModel = "claude-opus-4-8"
 
 // ---------------------------------------------------------------------------
 // Provider interfaces
@@ -91,6 +96,45 @@ type ConversationTurn struct {
 	// blocks to precede tool_use blocks in replayed assistant turns when
 	// extended thinking is enabled).
 	Thinking []ThinkingBlock `json:"thinking,omitempty"`
+
+	// ProviderName / Model record WHICH model produced an assistant turn.
+	//
+	// A conversation outlives the model that started it: `##llm select` swaps
+	// the provider on a live orchestrator, so the next model inherits a
+	// transcript of assistant turns it did not write. Without attribution it
+	// reads them as its own — one model answered "I'm ChatGPT", the next was
+	// asked the same question, saw that answer in its own voice, and
+	// "corrected" itself. Role alone cannot express this: every assistant turn
+	// is role "assistant" no matter who wrote it.
+	//
+	// Empty on user/tool turns, and on assistant turns recorded before this
+	// existed — treat empty as "unknown", never as "mine".
+	ProviderName string `json:"provider_name,omitempty"`
+	Model        string `json:"model,omitempty"`
+}
+
+// ProducedBy reports whether this turn was written by the given provider/model
+// pair. An unattributed turn belongs to nobody: it answers false for every
+// model, which is what keeps a legacy transcript from being claimed.
+func (t ConversationTurn) ProducedBy(providerName, model string) bool {
+	if t.ProviderName == "" && t.Model == "" {
+		return false
+	}
+	return t.ProviderName == providerName && t.Model == model
+}
+
+// Attribution renders a turn's producer for display, e.g. "openai
+// (gpt-5.6-luna)". Empty when the turn carries no attribution.
+func (t ConversationTurn) Attribution() string {
+	switch {
+	case t.ProviderName == "" && t.Model == "":
+		return ""
+	case t.Model == "":
+		return t.ProviderName
+	case t.ProviderName == "":
+		return t.Model
+	}
+	return t.ProviderName + " (" + t.Model + ")"
 }
 
 // CategorizeTurn returns the default category for a turn based on its role,
@@ -302,7 +346,7 @@ func (c *ClaudeAgenticProvider) outputConfig() *agenticOutputConfig {
 // NewClaudeAgenticProvider creates a new agentic provider with explicit parameters.
 func NewClaudeAgenticProvider(apiKey, apiURL, model string, maxTokens int) *ClaudeAgenticProvider {
 	if model == "" {
-		model = defaultModel
+		model = DefaultClaudeModel
 	}
 	if maxTokens <= 0 {
 		// Phase 3 smaller-wins: per-model defaults so long edits don't get
