@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package agentic
 
 // The reported failure, reproduced as a transcript: one model answers "I'm
@@ -266,8 +268,8 @@ func TestRequestSystemPromptMakesNoClaimItCannotSupport(t *testing.T) {
 // stubModelProvider reports a name and a model, like every real provider.
 type stubModelProvider struct{ name, model string }
 
-func (s stubModelProvider) Name() string  { return s.name }
-func (s stubModelProvider) Model() string { return s.model }
+func (s stubModelProvider) Name() string                                     { return s.name }
+func (s stubModelProvider) Model() string                                    { return s.model }
 func (s stubModelProvider) Complete(context.Context, string) (string, error) { return "", nil }
 func (s stubModelProvider) CompleteWithTools(context.Context, []provider.ConversationTurn,
 	[]provider.ToolSpec, string) (*provider.AgenticResponse, error) {
@@ -278,7 +280,7 @@ func (s stubModelProvider) CompleteWithTools(context.Context, []provider.Convers
 // that predates Model() or cannot answer it.
 type stubNoModelProvider struct{}
 
-func (stubNoModelProvider) Name() string { return "mystery" }
+func (stubNoModelProvider) Name() string                                     { return "mystery" }
 func (stubNoModelProvider) Complete(context.Context, string) (string, error) { return "", nil }
 func (stubNoModelProvider) CompleteWithTools(context.Context, []provider.ConversationTurn,
 	[]provider.ToolSpec, string) (*provider.AgenticResponse, error) {

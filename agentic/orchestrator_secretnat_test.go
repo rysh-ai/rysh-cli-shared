@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package agentic
 
 import (
@@ -50,7 +52,7 @@ func newNATTestOrch(nat secretnat.SessionHandle, reg *tools.ToolRegistry) *Orche
 		paneID:        "pane-test",
 		tools:         reg,
 		ctx:           context.Background(),
-		autoApproved:  map[string]bool{},
+		autoApproved:  NewApprovalMemory(),
 		loopThreshold: 3,
 		readTracker:   NewReadTracker(),
 		metrics:       NoopMetricsSink{},

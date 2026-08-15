@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package provider implements LLM provider interfaces and the Anthropic
 // Messages API client with tool-use support.
 package provider

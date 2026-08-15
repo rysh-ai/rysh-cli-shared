@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // Tool-use / tool-result pairing invariants for the Anthropic Messages API.

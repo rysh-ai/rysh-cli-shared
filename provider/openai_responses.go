@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // openai_responses.go — the OpenAI Responses API (`POST /v1/responses`).

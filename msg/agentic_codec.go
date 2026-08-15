@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package msg
 
 // RegisterAgenticCodecs registers all agentic message types with the given codec registry.

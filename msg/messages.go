@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package msg contains the minimal message types shared between the agentic
 // layer and the transport layer. This is a subset of the full CLI message set —
 // only the types needed by NATSPublisher helpers and the agentic actors.

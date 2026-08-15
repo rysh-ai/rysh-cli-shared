@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package agentic implements the agentic coding assistant actors for use in
 // both the CLI and server contexts.
 package agentic

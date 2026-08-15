@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package secretnat implements SecretNAT — also known by its alias ReSet
 // (Reversible Secret Translation) — a transparent, reversible secret
 // translation layer that sits between rysh and the LLM provider.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package agentic
 
 import (
@@ -98,7 +100,9 @@ type OrchestratorActor struct {
 	lastInputTokens   int // TotalInputTokens from the most recent LLM response
 
 	// Approval state
-	autoApproved    map[string]bool
+	// autoApproved is the SESSION's "approve all like this" registry, shared
+	// with the pane's execution actor so a `yes_always` outlives this turn.
+	autoApproved    *ApprovalMemory
 	pendingApproval *pendingApproval
 	// autoApproveAll, when true, treats every tool call as pre-approved and
 	// never publishes an approval request or spawns an approval pane. Used by
@@ -282,7 +286,7 @@ func NewOrchestratorActor(
 	toolRegistry *tools.ToolRegistry,
 	conversation []provider.ConversationTurn,
 	systemPrompt string,
-	autoApproved map[string]bool,
+	autoApproved *ApprovalMemory,
 	ctx context.Context,
 	maxIterations int,
 	pipelineOutputSubject string,
@@ -299,12 +303,6 @@ func NewOrchestratorActor(
 
 	if contextTokenLimit <= 0 {
 		contextTokenLimit = DefaultContextTokenLimit
-	}
-
-	// Copy auto-approved map
-	approvedCopy := make(map[string]bool)
-	for k, v := range autoApproved {
-		approvedCopy[k] = v
 	}
 
 	// Clone the shared registry so per-pane tools can be added without
@@ -326,7 +324,7 @@ func NewOrchestratorActor(
 		systemPrompt:          systemPrompt,
 		lastOutputNL:          true, // start-of-stream counts as a fresh line
 		ctx:                   ctx,
-		autoApproved:          approvedCopy,
+		autoApproved:          autoApproved,
 		callHistory:           make([]loopEntry, 0),
 		loopThreshold:         3,
 		filesChanged:          make([]string, 0),
@@ -1249,9 +1247,7 @@ func (o *OrchestratorActor) executeWithPreview(ctx actor.Context, tc provider.To
 		return shapeToolOutput(output)
 
 	case msg.DecisionYesAlways:
-		o.emitOutput("text", "[Approved always]\n")
-		approvalKey := o.buildApprovalKey(tc.Name, tc.Input)
-		o.autoApproved[approvalKey] = true
+		o.approveAlways(tc.Name, tc.Input)
 		o.emitStatus(PhaseExecuting)
 		if filePath != "" {
 			o.filesChanged = append(o.filesChanged, filePath)
@@ -1318,10 +1314,10 @@ func (o *OrchestratorActor) executeWithPreApproval(ctx actor.Context, tc provide
 	switch decision.Decision {
 	case msg.DecisionYes, msg.DecisionYesAlways:
 		if decision.Decision == msg.DecisionYesAlways {
-			approvalKey := o.buildApprovalKey(tc.Name, tc.Input)
-			o.autoApproved[approvalKey] = true
+			o.approveAlways(tc.Name, tc.Input)
+		} else {
+			o.emitOutput("text", "[Approved]\n")
 		}
-		o.emitOutput("text", "[Approved]\n")
 		o.emitStatus(PhaseExecuting)
 
 		// SecretNAT: restore real values for execution (transient copy),
@@ -1842,7 +1838,10 @@ func (o *OrchestratorActor) decideApproval(toolName string, input json.RawMessag
 	// The session "approve all like this" registry and headless auto-approve are
 	// both suppressed by a policy gate.
 	if needsApproval && !forceGate {
-		if o.autoApproved[o.buildApprovalKey(toolName, input)] {
+		// Either an answer given for this exact context, or one given for the
+		// whole tool (buildAlwaysKey — "never ask about edits again").
+		if o.autoApproved.Approved(o.buildApprovalKey(toolName, input)) ||
+			o.autoApproved.Approved(o.buildAlwaysKey(toolName, input)) {
 			needsApproval = false
 		}
 	}
@@ -1859,6 +1858,27 @@ func withPolicyRule(desc, policyRule string) string {
 		return desc
 	}
 	return desc + " [gated by policy rule " + policyRule + "]"
+}
+
+// buildAlwaysKey is the key a `yes_always` is RECORDED under, which is not the
+// key a call is looked up by (buildApprovalKey).
+//
+// It is the TOOL, for every tool: "Always" means never ask about this tool
+// again for the life of the pane's agent. Keying the answer to the context —
+// the file for an edit, the verb for bash — is what the lookup does, and using
+// it for the answer too meant an agent working through fifteen files asked
+// fifteen times, each answer remembered correctly and none of them the grant
+// the human thought they were giving.
+//
+// WHAT THIS COSTS, stated plainly because the button does not: one "Always" on
+// `bash: git status` also approves `rm -rf`, `curl … | sh` and `sudo` from that
+// pane's agent for the rest of the session. That is the owner's explicit
+// choice (asked, flagged, reaffirmed 2026-08-14). Two things still stand
+// between an agent and an unreviewed command, and neither is weakened here:
+// a policy GATE rule outranks any session grant (decideApproval, forceGate),
+// and the FIRST call of a tool still asks.
+func (o *OrchestratorActor) buildAlwaysKey(toolName string, _ json.RawMessage) string {
+	return toolName
 }
 
 func (o *OrchestratorActor) buildApprovalKey(toolName string, params json.RawMessage) string {
@@ -1882,6 +1902,19 @@ func (o *OrchestratorActor) buildApprovalKey(toolName string, params json.RawMes
 		}
 	}
 	return toolName
+}
+
+// approveAlways records a `yes_always` and says, in the pane, what it covered —
+// "every edit this session" is a materially different grant from "this file",
+// and the human just made it with one keystroke.
+func (o *OrchestratorActor) approveAlways(toolName string, input json.RawMessage) {
+	o.autoApproved.Approve(o.buildAlwaysKey(toolName, input))
+	label := "every " + toolName + " call"
+	if toolName == "bash" {
+		// The one worth spelling out: it covers commands nobody has typed yet.
+		label = "EVERY bash command, including ones not yet seen"
+	}
+	o.emitOutput("text", "[Approved always — "+label+" this session]\n")
 }
 
 // toolCallLabel returns a short context string for display.

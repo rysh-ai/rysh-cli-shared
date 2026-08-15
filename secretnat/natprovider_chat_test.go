@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package secretnat
 
 // ChatProvider-path sanitization proofs (design 002 A1 final step).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // The reported failure, as a test: a transient transport error on the OpenAI

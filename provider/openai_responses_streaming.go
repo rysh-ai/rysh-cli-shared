@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // openai_responses_streaming.go — SSE streaming for the OpenAI Responses API.
