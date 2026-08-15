@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // openai_retry.go — retry/backoff for the OpenAI-compatible provider.

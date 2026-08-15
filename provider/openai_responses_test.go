@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // Tests for the OpenAI Responses dialect (openai_responses.go). The wire

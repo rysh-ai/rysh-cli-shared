@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // Follow-up item 1 — multimodal input (image content blocks).

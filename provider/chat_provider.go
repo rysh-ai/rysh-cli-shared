@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // Design 002 A2 — the widened, provider-neutral chat interface.

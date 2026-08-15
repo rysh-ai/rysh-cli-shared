@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package provider
 
 // Design 002 A1 — the neutral conversation model.

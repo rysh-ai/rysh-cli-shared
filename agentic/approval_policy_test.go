@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package agentic
 
 import (
@@ -27,13 +29,13 @@ func TestDecideApproval_PolicyOverrides(t *testing.T) {
 
 	// Headless auto-approve on, classifier says no approval needed — a GATE rule
 	// must still force approval, and cite the rule.
-	o := &OrchestratorActor{autoApproved: map[string]bool{}, autoApproveAll: true}
+	o := &OrchestratorActor{autoApproved: NewApprovalMemory(), autoApproveAll: true}
 	if need, rule := o.decideApproval("bash", json.RawMessage(`{"command":"rm -rf /"}`), false); !need || rule != "bash.deny[0]" {
 		t.Fatalf("gate under autoApproveAll = (need=%v rule=%q), want (true, bash.deny[0])", need, rule)
 	}
 
 	// The per-session "approve all like this" registry is likewise overridden.
-	o2 := &OrchestratorActor{autoApproved: map[string]bool{"bash:x": true}, autoApproveAll: false}
+	o2 := &OrchestratorActor{autoApproved: ApprovalMemoryFrom(map[string]bool{"bash:x": true}), autoApproveAll: false}
 	if need, _ := o2.decideApproval("bash", json.RawMessage(`{"command":"x"}`), true); !need {
 		t.Fatal("gate did not override the session auto-approve registry")
 	}
@@ -45,7 +47,7 @@ func TestDecideApproval_PolicyOverrides(t *testing.T) {
 
 	// No matching rule → fall through to the classifier verdict, no rule cited.
 	// Use a non-headless orchestrator so the classifier's "true" is what stands.
-	o3 := &OrchestratorActor{autoApproved: map[string]bool{}, autoApproveAll: false}
+	o3 := &OrchestratorActor{autoApproved: NewApprovalMemory(), autoApproveAll: false}
 	if need, rule := o3.decideApproval("web_fetch", json.RawMessage(`{}`), true); !need || rule != "" {
 		t.Fatalf("default path = (need=%v rule=%q), want (true, \"\")", need, rule)
 	}
@@ -55,7 +57,7 @@ func TestDecideApproval_PolicyOverrides(t *testing.T) {
 // exactly as before when no policy is installed (no regression).
 func TestDecideApproval_NoPolicy(t *testing.T) {
 	SetApprovalPolicy(nil)
-	o := &OrchestratorActor{autoApproved: map[string]bool{}, autoApproveAll: false}
+	o := &OrchestratorActor{autoApproved: NewApprovalMemory(), autoApproveAll: false}
 	if need, rule := o.decideApproval("bash", json.RawMessage(`{"command":"x"}`), true); !need || rule != "" {
 		t.Fatalf("classifier-requires with no policy = (%v, %q), want (true, \"\")", need, rule)
 	}

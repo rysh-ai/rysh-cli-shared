@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package msg — conversation.go defines the unified ConversationMessage type
 // and related enums. This is the canonical Go representation used by all actors.
 //

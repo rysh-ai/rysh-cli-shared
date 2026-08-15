@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package mcpclient is a minimal Model Context Protocol (MCP) client for
 // server-side rysh components.
 //

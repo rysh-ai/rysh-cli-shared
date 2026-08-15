@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package agentic implements the agentic coding assistant actors.
 // The LLMPromptExecutionActor manages conversation history and spawns OrchestratorActors
 // for each user request. The OrchestratorActor runs the autonomous loop:
@@ -123,7 +125,10 @@ type LLMPromptExecutionActor struct {
 	runOutputDir string
 
 	// Auto-approval registry (tool:context → true)
-	autoApproved map[string]bool
+	// autoApproved is the pane's session-scoped "approve all like this"
+	// registry. Shared (not copied) with every orchestrator this actor spawns,
+	// so an answer given in one turn still holds in the next.
+	autoApproved *ApprovalMemory
 	// autoApproveAll, when true, is propagated to every spawned orchestrator so
 	// all tool calls run without an approval prompt (headless humanoids/agents).
 	autoApproveAll bool
@@ -259,7 +264,7 @@ func NewLLMPromptExecutionActor(
 		tools:                 toolRegistry,
 		systemPrompt:          systemPrompt,
 		session:               NewSessionMemory(paneID, kvStore),
-		autoApproved:          make(map[string]bool),
+		autoApproved:          NewApprovalMemory(),
 		inboxSubject:          msg.T("pane", paneID, "llm_prompt_execution", "inbox"),
 		outputSubject:         msg.T("pane", paneID, "llm_prompt_execution", "output"),
 		statusSubject:         msg.T("pane", paneID, "llm_prompt_execution", "status"),
@@ -1202,7 +1207,7 @@ func (a *LLMPromptExecutionActor) Session() *SessionMemory {
 
 // SetAutoApproval grants automatic approval for a tool+context combination.
 func (a *LLMPromptExecutionActor) SetAutoApproval(key string) {
-	a.autoApproved[key] = true
+	a.autoApproved.Approve(key)
 }
 
 // SetAutoApproveAll enables headless auto-approval for every orchestrator this

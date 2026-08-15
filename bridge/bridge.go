@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package bridge provides the NATSBridge that delivers NATS messages to a
 // proto.actor actor mailbox. Each actor creates one NATSBridge and calls
 // AddSubject() for each NATS subject it wants to receive messages on.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package agentic
 
 // turn_model.go — telling the active model which assistant turns are not its own.
