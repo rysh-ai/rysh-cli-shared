@@ -98,7 +98,18 @@ type MsgSetRunBudget struct {
 	AutoContinue bool `json:"auto_continue"`
 	// AutoApprove, when true, runs this run's tool calls without an approval
 	// prompt (##web auto step.auto_approve). Independent of AutoContinue.
-	AutoApprove        bool  `json:"auto_approve"`
+	AutoApprove bool `json:"auto_approve"`
+	// AutoApprovePersist promotes AutoApprove from per-run state to the
+	// actor's own default: it survives disarmRunBudget (which fires on every
+	// terminal outcome, a clean finish included), so every LATER prompt to
+	// this pane's agent runs approval-free too — not just the run being armed.
+	// This is the fleet arm: a fleet agent launched approval-free used to be
+	// approval-free for exactly one turn, and its second work order stalled at
+	// the first `bash` on an approval prompt nobody was watching (E-45,
+	// f8824f5's defect in native dress). Send AutoApprovePersist=true with
+	// AutoApprove=false to turn the sticky grant back off. Policy gate rules
+	// (always_gate / bash.deny) still override either form downstream.
+	AutoApprovePersist bool  `json:"auto_approve_persist,omitempty"`
 	MaxTotalIterations int   `json:"max_total_iterations,omitempty"`
 	MaxDurationMs      int64 `json:"max_duration_ms,omitempty"`
 	// StepInterval is the per-leg step cap (how many tool-iterations run before a

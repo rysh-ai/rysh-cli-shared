@@ -236,6 +236,49 @@ func TestSetRunBudget_AutoApprove(t *testing.T) {
 	}
 }
 
+// TestSetRunBudget_AutoApprovePersist covers the fleet arm: a persistent
+// auto-approve survives disarmRunBudget (which fires on EVERY terminal outcome,
+// clean finishes included), so a fleet agent stays approval-free past its first
+// turn instead of stalling its second work order on an approval prompt nobody
+// is watching. Also covers the symmetric revoke, and that a plain (non-persist)
+// arm never sets the sticky flag.
+func TestSetRunBudget_AutoApprovePersist(t *testing.T) {
+	a := &LLMPromptExecutionActor{paneID: "p", maxIterations: 50}
+
+	// The fleet arm shape: no auto-continue, persistent auto-approve.
+	a.handleSetRunBudget(&msg.MsgSetRunBudget{AutoContinue: false, AutoApprove: true, AutoApprovePersist: true})
+	if !a.autoApproveAll {
+		t.Fatal("autoApproveAll should be set by a persistent arm")
+	}
+	// A clean finish disarms the run budget — the sticky grant must hold.
+	a.disarmRunBudget()
+	if !a.autoApproveAll {
+		t.Fatal("autoApproveAll must survive disarmRunBudget — that clearing is F-54's sibling: an agent approval-free for exactly one turn")
+	}
+	if a.runAutoApprove {
+		t.Error("runAutoApprove (per-run) should still be cleared on disarm")
+	}
+
+	// A later per-run arm and disarm cycle leaves the sticky grant alone.
+	a.handleSetRunBudget(&msg.MsgSetRunBudget{AutoContinue: true, AutoApprove: true, MaxTotalIterations: 100})
+	a.disarmRunBudget()
+	if !a.autoApproveAll {
+		t.Error("a per-run arm/disarm cycle must not clear the sticky grant")
+	}
+
+	// Explicit revoke: persistent AutoApprove=false turns it back off.
+	a.handleSetRunBudget(&msg.MsgSetRunBudget{AutoContinue: false, AutoApprove: false, AutoApprovePersist: true})
+	if a.autoApproveAll {
+		t.Error("a persistent AutoApprove=false must revoke the sticky grant")
+	}
+
+	// A plain (non-persist) arm never sets the sticky flag.
+	a.handleSetRunBudget(&msg.MsgSetRunBudget{AutoContinue: false, AutoApprove: true})
+	if a.autoApproveAll {
+		t.Error("a non-persist arm must not set autoApproveAll")
+	}
+}
+
 // TestHandleSetRunBudget covers arming (leg allowance derived from the total
 // iteration budget and the per-leg cap) and clearing.
 func TestHandleSetRunBudget(t *testing.T) {

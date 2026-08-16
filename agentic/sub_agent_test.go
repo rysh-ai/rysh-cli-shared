@@ -217,6 +217,33 @@ func TestLastAssistantText(t *testing.T) {
 	}
 }
 
+// TestSubAgentInheritsExecutionSettings covers the parent→child settings copy
+// performed at sub-agent spawn. The auto-approval half is the load-bearing
+// assertion: it was the copy MISSING from handleSubAgentSpawn, so an
+// approval-free parent (fleet agent / humanoid / armed automation) spawned
+// gated children whose approval dialog nobody was watching — the delegation
+// stalled mid-run while the parent looked armed.
+func TestSubAgentInheritsExecutionSettings(t *testing.T) {
+	// Approval-free parent with enforced grounding.
+	parent := &OrchestratorActor{autoApproveAll: true, groundingMode: GroundingEnforced}
+	child := &OrchestratorActor{}
+	parent.inheritExecutionSettings(child)
+	if !child.autoApproveAll {
+		t.Fatal("child must inherit autoApproveAll — a gated child of an approval-free parent stalls the delegation")
+	}
+	if child.groundingMode != GroundingPrompt {
+		t.Errorf("child grounding = %q, want advisory %q (enforced would burn the child's tighter budget)", child.groundingMode, GroundingPrompt)
+	}
+
+	// Gated parent stays gated: the copy must not invent autonomy.
+	gatedParent := &OrchestratorActor{autoApproveAll: false}
+	gatedChild := &OrchestratorActor{autoApproveAll: true} // pre-set to prove it is overwritten
+	gatedParent.inheritExecutionSettings(gatedChild)
+	if gatedChild.autoApproveAll {
+		t.Error("a gated parent must produce a gated child — inheritance copies the value, it does not OR it")
+	}
+}
+
 // TestSubAgentConstants pins the depth/iteration constants so accidental
 // changes are caught.
 func TestSubAgentConstants(t *testing.T) {
