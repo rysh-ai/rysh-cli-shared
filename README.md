@@ -24,6 +24,15 @@ To work on it against a live CLI checkout, clone
 [`rysh-cli-parent`](https://github.com/rysh-ai/rysh-cli-parent) — its `go.work`
 resolves this module to your local tree, so edits are picked up without a release.
 
+## Contributing and security
+
+**This repository is a one-way export** of a tree developed elsewhere, so a commit
+pushed straight here is overwritten by the next export rather than kept —
+[CONTRIBUTING.md](CONTRIBUTING.md) explains where a patch actually lands.
+
+**Found a vulnerability? Do not open a public issue, PR or discussion** —
+[SECURITY.md](SECURITY.md) has the private channels.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
