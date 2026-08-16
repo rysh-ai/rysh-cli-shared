@@ -130,7 +130,10 @@ type LLMPromptExecutionActor struct {
 	// so an answer given in one turn still holds in the next.
 	autoApproved *ApprovalMemory
 	// autoApproveAll, when true, is propagated to every spawned orchestrator so
-	// all tool calls run without an approval prompt (headless humanoids/agents).
+	// all tool calls run without an approval prompt (headless humanoids/agents,
+	// and panes armed with MsgSetRunBudget.AutoApprovePersist — the fleet arm).
+	// Unlike runAutoApprove it survives disarmRunBudget, so it holds across
+	// runs until explicitly revoked.
 	autoApproveAll bool
 
 	// groundingMode is propagated to every spawned orchestrator: "" / off,
@@ -724,6 +727,16 @@ func withOutputDirNote(prompt, outputDir string) string {
 // the total-iteration budget and the per-leg iteration cap: e.g. 300 total with
 // a 50-cap → 6 legs → 5 automatic resumes.
 func (a *LLMPromptExecutionActor) handleSetRunBudget(m *msg.MsgSetRunBudget) {
+	// A persistent arm sets the ACTOR-level flag, which disarmRunBudget never
+	// touches — this is what makes a fleet agent approval-free for its whole
+	// life rather than for exactly one turn (the run-scoped flag below is
+	// cleared on every terminal outcome, clean finishes included). Applied for
+	// both the armed and the cleared branch, and symmetric: a persistent
+	// AutoApprove=false explicitly revokes a sticky grant.
+	if m.AutoApprovePersist {
+		a.autoApproveAll = m.AutoApprove
+		slog.Info("agentic: persistent auto-approve set", "pane", a.paneID, "autoApprove", m.AutoApprove)
+	}
 	if !m.AutoContinue {
 		a.disarmRunBudget() // clears runAutoApprove; re-set below since it's independent
 		a.runAutoApprove = m.AutoApprove

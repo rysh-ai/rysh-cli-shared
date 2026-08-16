@@ -2241,18 +2241,7 @@ func (o *OrchestratorActor) handleSubAgentSpawn(ctx actor.Context, req *subAgent
 		o.agentName, // sub-agent spend attributes to the same agent
 	)
 
-	// Sub-agents inherit the grounding protocol in ADVISORY form only: they
-	// are pre-scoped by the parent's delegation (task + context), so the
-	// enforced read-only gate would just burn their tighter iteration budget.
-	if o.groundingMode == GroundingPrompt || o.groundingMode == GroundingEnforced {
-		childOrch.SetGroundingMode(GroundingPrompt)
-	}
-
-	// Sub-agents share the parent's SecretNAT session: they operate in the
-	// same conversation context, so token↔value mappings must be consistent
-	// across the delegation boundary. (o.prov is already the NAT-wrapped leg
-	// provider — the child's HTTP boundary is covered too.)
-	childOrch.SetSecretNAT(o.nat)
+	o.inheritExecutionSettings(childOrch)
 
 	props := actor.PropsFromProducer(func() actor.Actor { return childOrch })
 	pid, err := ctx.SpawnNamed(props, "sub-orch-"+req.childOrchID[:8])
@@ -2267,6 +2256,32 @@ func (o *OrchestratorActor) handleSubAgentSpawn(ctx actor.Context, req *subAgent
 	o.pendingSubAgents[req.childOrchID] = req.doneCh
 	_ = pid // PID retained via actor system; we do not need to track it here.
 	req.spawnedCh <- pid
+}
+
+// inheritExecutionSettings copies the parent-scoped execution settings onto a
+// freshly built child orchestrator. One function on purpose: these copies used
+// to live inline in handleSubAgentSpawn, and the one that was MISSING there —
+// auto-approval — meant an approval-free parent (a fleet agent, humanoid, or
+// armed automation) spawned GATED children whose approval dialog had exactly
+// the same nobody watching it that the parent's would have had, stalling the
+// delegation the parent's arm existed to keep moving.
+//
+//   - Grounding is inherited in ADVISORY form only: sub-agents are pre-scoped
+//     by the parent's delegation (task + context), so the enforced read-only
+//     gate would just burn their tighter iteration budget.
+//   - SecretNAT is shared, not copied: parent and child operate in the same
+//     conversation context, so token↔value mappings must be consistent across
+//     the delegation boundary. (o.prov is already the NAT-wrapped leg
+//     provider — the child's HTTP boundary is covered too.)
+//   - autoApproveAll is copied verbatim. Policy gate rules (always_gate /
+//     bash.deny) still override it in the child's own decideApproval
+//     (forceGate), so an org gate holds across the delegation boundary too.
+func (o *OrchestratorActor) inheritExecutionSettings(childOrch *OrchestratorActor) {
+	if o.groundingMode == GroundingPrompt || o.groundingMode == GroundingEnforced {
+		childOrch.SetGroundingMode(GroundingPrompt)
+	}
+	childOrch.SetSecretNAT(o.nat)
+	childOrch.SetAutoApproveAll(o.autoApproveAll)
 }
 
 // surfaceToolResultContent renders a tool result for inclusion as a `tool`
