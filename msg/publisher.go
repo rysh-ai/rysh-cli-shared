@@ -5,7 +5,9 @@ package msg
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -15,6 +17,18 @@ import (
 type NATSPublisher struct {
 	nc     *nats.Conn
 	codecs *CodecRegistry
+
+	// Reply multiplexing: one wildcard subscription on <respPrefix>.* serves
+	// every Request, routed to the waiting caller by the last subject token —
+	// the scheme nats.go uses for its own requests. Request used to subscribe
+	// and unsubscribe a fresh inbox per call: two protocol round trips through
+	// the server for every hop of every snapshot cascade (F-71).
+	respOnce   sync.Once
+	respErr    error
+	respPrefix string
+	respMu     sync.Mutex
+	respNext   uint64
+	respWait   map[string]chan *nats.Msg
 }
 
 // NewNATSPublisher creates a NATSPublisher backed by nc and codecs.
@@ -43,7 +57,12 @@ func (p *NATSPublisher) Send(subject string, message interface{}) error {
 // Request publishes a message and waits up to timeout for a typed reply.
 // The reply is decoded via codecs and returned as an interface{}.
 func (p *NATSPublisher) Request(subject string, message interface{}, timeout time.Duration) (interface{}, error) {
-	replyTo := nats.NewInbox()
+	// Register for the reply before publishing, so it cannot be missed.
+	replyTo, replyCh, release, err := p.awaitReply()
+	if err != nil {
+		return nil, fmt.Errorf("request: subscribe reply inbox: %w", err)
+	}
+	defer release()
 
 	data, err := p.marshal(message, replyTo)
 	if err != nil {
@@ -55,14 +74,6 @@ func (p *NATSPublisher) Request(subject string, message interface{}, timeout tim
 		ml.LogRequest(subject, tag, len(data), timeout, subjectActor(subject))
 		ml.LogPayload("REQ", subject, tag, data, subjectActor(subject))
 	}
-
-	// Subscribe to the reply inbox before publishing to avoid a race.
-	replyCh := make(chan *nats.Msg, 1)
-	sub, err := p.nc.ChanSubscribe(replyTo, replyCh)
-	if err != nil {
-		return nil, fmt.Errorf("request: subscribe reply inbox: %w", err)
-	}
-	defer func() { _ = sub.Unsubscribe() }()
 
 	if err := p.nc.Publish(subject, data); err != nil {
 		return nil, fmt.Errorf("request: publish: %w", err)
@@ -91,6 +102,45 @@ func (p *NATSPublisher) Request(subject string, message interface{}, timeout tim
 			ml.LogError("request timeout", subject, fmt.Errorf("timeout after %s", timeout), subjectActor(subject))
 		}
 		return nil, fmt.Errorf("request: timeout waiting for reply on %s", subject)
+	}
+}
+
+// awaitReply registers a one-shot reply slot on the publisher's shared inbox
+// subscription and returns its subject, the channel the reply arrives on, and
+// a release func that must be called when the caller stops waiting.
+func (p *NATSPublisher) awaitReply() (string, <-chan *nats.Msg, func(), error) {
+	p.respOnce.Do(func() {
+		p.respPrefix = nats.NewInbox()
+		p.respWait = make(map[string]chan *nats.Msg)
+		_, p.respErr = p.nc.Subscribe(p.respPrefix+".*", p.routeReply)
+	})
+	if p.respErr != nil {
+		return "", nil, nil, p.respErr
+	}
+	ch := make(chan *nats.Msg, 1)
+	p.respMu.Lock()
+	p.respNext++
+	token := strconv.FormatUint(p.respNext, 36)
+	p.respWait[token] = ch
+	p.respMu.Unlock()
+	release := func() {
+		p.respMu.Lock()
+		delete(p.respWait, token)
+		p.respMu.Unlock()
+	}
+	return p.respPrefix + "." + token, ch, release, nil
+}
+
+// routeReply hands a reply to the Request waiting on its token. A reply for a
+// request that already timed out, or a duplicate, is dropped.
+func (p *NATSPublisher) routeReply(m *nats.Msg) {
+	token := m.Subject[strings.LastIndexByte(m.Subject, '.')+1:]
+	p.respMu.Lock()
+	ch := p.respWait[token]
+	delete(p.respWait, token)
+	p.respMu.Unlock()
+	if ch != nil {
+		ch <- m // buffered 1, and removed from the map: never blocks
 	}
 }
 

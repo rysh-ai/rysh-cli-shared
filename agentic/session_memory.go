@@ -268,7 +268,7 @@ func CloseDanglingToolCalls(turns []provider.ConversationTurn, note string) []pr
 		}
 		turns = append(turns, provider.ConversationTurn{
 			Role:        "tool",
-			Content:     "[error kind=cancelled] " + note,
+			Content:     cancelledResultPrefix + " " + note,
 			ToolCallID:  tc.ID,
 			IsError:     true,
 			Category:    provider.TurnCategoryTool,

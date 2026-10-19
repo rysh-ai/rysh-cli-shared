@@ -966,6 +966,16 @@ func (o *OrchestratorActor) buildToolResultTurn(tc provider.ToolCallRequest, res
 			if title := result.Metadata["sub_agent_title"]; title != "" {
 				turn.Summary = title + " — " + toolResultSummary(result)
 			}
+			if raw := result.Metadata[SubAgentCallsMetaKey]; raw != "" {
+				var calls []provider.SubAgentCall
+				if json.Unmarshal([]byte(raw), &calls) == nil {
+					turn.SubAgentCalls = calls
+				}
+			}
+			// Moved, not copied: the child list lives on only in the in-process
+			// turn field (json:"-"). The key must not ride the ToolOutput any
+			// further, where a marshal of it would carry the list as a string.
+			delete(result.Metadata, SubAgentCallsMetaKey)
 		}
 	}
 	return turn
@@ -1179,19 +1189,25 @@ func (o *OrchestratorActor) updateReadTrackerOnSuccess(toolName string, params j
 	}
 }
 
-// executeWithPreview executes a file tool to generate the diff, then asks approval before applying.
-// policyRule, when non-empty, is the policy-as-code rule that forced this gate (design 013); it is
-// surfaced in the approval prompt for traceability.
+// executeWithPreview shows a file tool's diff and asks approval before applying.
+// When the tool implements tools.Previewer, the diff is computed without
+// writing and the tool is executed only on approval — a rejected change never
+// reaches disk. A tool without Preview is executed first (legacy behaviour).
+// policyRule, when non-empty, is the policy-as-code rule that forced this gate
+// (design 013); it is surfaced in the approval prompt for traceability.
 func (o *OrchestratorActor) executeWithPreview(ctx actor.Context, tc provider.ToolCallRequest, executor tools.ToolExecutor, policyRule string) *tools.ToolOutput {
-	// Execute to get the diff/preview. SecretNAT: restore real values for the
-	// write itself (transient copy), then sanitize the resulting diff at
-	// source so the preview shown for approval, the approval payload, and the
-	// tool_result all carry tokens only.
-	output, err := executor.Execute(o.ctx, o.natRestoreInput(tc.Input))
+	// SecretNAT: restore real values for the tool (transient copy), then
+	// sanitize the resulting diff at source so the preview shown for approval,
+	// the approval payload, and the tool_result all carry tokens only.
+	output, canPreview, err := o.previewFileChange(tc, executor)
 	if err != nil {
 		errMsg := fmt.Sprintf("tool %s failed: %v", tc.Name, err)
 		o.emitToolError(err.Error())
 		return o.natSanitizeOutput(&tools.ToolOutput{Error: errMsg})
+	}
+	if output != nil && output.Error != "" {
+		// Validation failure (old_string not found, …): nothing to approve.
+		return shapeToolOutput(o.natSanitizeOutput(output))
 	}
 	output = o.natSanitizeOutput(output)
 
@@ -1238,21 +1254,27 @@ func (o *OrchestratorActor) executeWithPreview(ctx actor.Context, tc provider.To
 	}
 
 	switch decision.Decision {
-	case msg.DecisionYes:
-		o.emitOutput("text", "[Approved]\n")
+	case msg.DecisionYes, msg.DecisionYesAlways:
+		if decision.Decision == msg.DecisionYes {
+			o.emitOutput("text", "[Approved]\n")
+		} else {
+			o.approveAlways(tc.Name, tc.Input)
+		}
 		o.emitStatus(PhaseExecuting)
+		applied := output
+		if canPreview {
+			// Only now does the change reach disk.
+			applied = applyApprovedChange(o.ctx, executor, o.natRestoreInput(tc.Input))
+			if applied.Error != "" {
+				o.emitToolError(applied.Error)
+				return shapeToolOutput(o.natSanitizeOutput(applied))
+			}
+			applied = o.natSanitizeOutput(applied)
+		}
 		if filePath != "" {
 			o.filesChanged = append(o.filesChanged, filePath)
 		}
-		return shapeToolOutput(output)
-
-	case msg.DecisionYesAlways:
-		o.approveAlways(tc.Name, tc.Input)
-		o.emitStatus(PhaseExecuting)
-		if filePath != "" {
-			o.filesChanged = append(o.filesChanged, filePath)
-		}
-		return shapeToolOutput(output)
+		return shapeToolOutput(applied)
 
 	case msg.DecisionNo:
 		o.emitOutput("text", "[Rejected]\n")
@@ -1272,12 +1294,7 @@ func (o *OrchestratorActor) executeWithPreview(ctx actor.Context, tc provider.To
 		}
 
 	default:
-		o.emitOutput("text", "[No response - skipping]\n")
-		o.emitStatus(PhaseExecuting)
-		return &tools.ToolOutput{
-			Content: "No approval received, change not applied.",
-			Error:   "no approval",
-		}
+		return o.unmatchedApprovalDecision(decision, "No approval received, change not applied.")
 	}
 }
 
@@ -1346,10 +1363,32 @@ func (o *OrchestratorActor) executeWithPreApproval(ctx actor.Context, tc provide
 		}
 
 	default:
-		o.emitOutput("text", "[No response - skipping]\n")
-		o.emitStatus(PhaseExecuting)
-		return &tools.ToolOutput{Content: "No approval received.", Error: "no approval"}
+		return o.unmatchedApprovalDecision(decision, "No approval received.")
 	}
+}
+
+// unmatchedApprovalDecision answers a gate whose decision matched none of the
+// approve/reject cases: the tool does not run. noApproval is the gate's own
+// wording for the model.
+//
+// choice_selected is legal but is never an answer to a gate (F-47): gates
+// publish no Choices — the only request that does is ask_user's question,
+// which consumes ChoiceIdx itself (rysh-cli internal/tools/ask_user.go). A
+// choice landing here means a client answered the wrong prompt, so it is named
+// as that rather than reported as "no response", and the tool does not run.
+func (o *OrchestratorActor) unmatchedApprovalDecision(decision *msg.MsgApprovalResponse, noApproval string) *tools.ToolOutput {
+	if decision.Decision == msg.DecisionChoiceSelected {
+		o.emitOutput("text", fmt.Sprintf("[Choice %d is not an answer to this approval — not run]\n", decision.ChoiceIdx+1))
+		o.emitStatus(PhaseExecuting)
+		return &tools.ToolOutput{
+			Content: fmt.Sprintf("The approval was answered with choice_selected (option %d), but this action offered no choices, so it was not run.",
+				decision.ChoiceIdx+1),
+			Error: "invalid approval decision: choice_selected",
+		}
+	}
+	o.emitOutput("text", "[No response - skipping]\n")
+	o.emitStatus(PhaseExecuting)
+	return &tools.ToolOutput{Content: noApproval, Error: "no approval"}
 }
 
 // waitForApproval blocks until an approval response is received for the given request ID.
@@ -1407,6 +1446,32 @@ func (o *OrchestratorActor) waitForApproval(requestID string) *msg.MsgApprovalRe
 	}
 }
 
+// previewFileChange produces the diff shown at the approval prompt. For a
+// tools.Previewer it computes the change WITHOUT writing (canPreview=true);
+// otherwise it falls back to Execute, which writes (legacy tools).
+func (o *OrchestratorActor) previewFileChange(tc provider.ToolCallRequest, executor tools.ToolExecutor) (out *tools.ToolOutput, canPreview bool, err error) {
+	if previewer, ok := executor.(tools.Previewer); ok {
+		out, err = previewer.Preview(o.ctx, o.natRestoreInput(tc.Input))
+		return out, true, err
+	}
+	out, err = executor.Execute(o.ctx, o.natRestoreInput(tc.Input))
+	return out, false, err
+}
+
+// applyApprovedChange executes a previewed tool after the user approved it.
+// An execution error (e.g. the file changed since the preview and old_string
+// no longer matches) is returned as a failed tool result rather than applied.
+func applyApprovedChange(ctx context.Context, executor tools.ToolExecutor, input json.RawMessage) *tools.ToolOutput {
+	out, err := executor.Execute(ctx, input)
+	if err != nil {
+		return &tools.ToolOutput{Error: fmt.Sprintf("apply failed after approval: %v", err), ErrorKind: tools.ErrKindInternal}
+	}
+	if out == nil {
+		return &tools.ToolOutput{Error: "apply failed after approval: no output", ErrorKind: tools.ErrKindInternal}
+	}
+	return out
+}
+
 // approvalInterruptedReason marks an approval wait that ended because the run
 // was interrupted (double-Ctrl+C / replacement prompt), as opposed to the
 // user answering "no". Callers translate it into an ErrKindCancelled tool
@@ -1436,7 +1501,24 @@ func (o *OrchestratorActor) handleToolResult(_ actor.Context, _ *msg.MsgToolResu
 	// This handler is for future async tool execution.
 }
 
+// isToolChromeOutput reports whether an emitOutput type is agent working
+// output (see msg.ConversationMessage.ToolChrome) rather than answer text.
+func isToolChromeOutput(outputType string) bool {
+	switch outputType {
+	case "tool_call", "tool_result", "diff":
+		return true
+	}
+	return false
+}
+
 func (o *OrchestratorActor) emitOutput(outputType, content string) {
+	o.emitOutputMarked(outputType, content, isToolChromeOutput(outputType))
+}
+
+// emitOutputMarked is emitOutput with the tool-chrome mark explicit, for emits
+// whose output type does not say it (a tool error is type "error", like a
+// genuine run failure the visitor should see).
+func (o *OrchestratorActor) emitOutputMarked(outputType, content string, toolChrome bool) {
 	// Track whether the cumulative output currently sits at the start of a
 	// line, so tool-call headers can be forced onto their own line (streamed
 	// assistant text rarely ends in a newline). Empty emits don't move it.
@@ -1472,6 +1554,7 @@ func (o *OrchestratorActor) emitOutput(outputType, content string) {
 		SubjectToShare:   true,
 		ProviderName:     attr.providerName,
 		Model:            attr.model,
+		ToolChrome:       toolChrome,
 	}
 
 	if o.pipelineOutputSubject != "" {
@@ -2035,7 +2118,7 @@ func toolResultSummary(output *tools.ToolOutput) string {
 // emitToolError renders a failed tool execution as the indented result branch
 // beneath its "⏺ tool(...)" header, matching the success-result layout.
 func (o *OrchestratorActor) emitToolError(errMsg string) {
-	o.emitOutput("error", toolResultBranch("✗ "+truncate(firstLine(errMsg), 200)))
+	o.emitOutputMarked("error", toolResultBranch("✗ "+truncate(firstLine(errMsg), 200)), true)
 }
 
 // firstLine returns the first non-empty line of s, trimmed. Used to keep
@@ -2198,6 +2281,13 @@ func (o *OrchestratorActor) handleSubAgent(ctx actor.Context, tc provider.ToolCa
 		"sub_agent_id":     done.OrchestratorID,
 		"sub_agent_title":  title,
 		"sub_agent_digest": digest,
+	}
+	// The child's tool calls ride the result as structured metadata (never in
+	// Content) so an audit consumer has an ordered record of them.
+	if calls := SubAgentCallsFromConversation(done.Conversation); len(calls) > 0 {
+		if b, err := json.Marshal(calls); err == nil {
+			meta[SubAgentCallsMetaKey] = string(b)
+		}
 	}
 	o.emitStep(msg.StepSubAgentEnd, title+" — "+digest, summary, provider.TurnCategorySubAgent, done.OrchestratorID)
 	o.emitOutput("tool_result", toolResultBranch("✓"))

@@ -77,6 +77,16 @@ type ToolExecutor interface {
 	RequiresApproval(params json.RawMessage) bool
 }
 
+// Previewer is implemented by file-mutating tools (edit, file_write) that can
+// compute their result — the unified diff — without touching disk. The
+// orchestrator's approval gate calls Preview to show the diff, and calls
+// Execute only after the user approves, so a rejected change is never written.
+// A tool that does not implement Previewer is executed before the approval
+// prompt (legacy behaviour).
+type Previewer interface {
+	Preview(ctx context.Context, params json.RawMessage) (*ToolOutput, error)
+}
+
 // ToolRegistry holds all registered tool executors.
 //
 // A registry may optionally have a parent. Lookups (Get/AllSpecs/Names) consult

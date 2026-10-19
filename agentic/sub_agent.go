@@ -22,6 +22,11 @@ import (
 // ToolExecutor (whose Execute is a defensive no-op).
 const SubAgentToolName = "sub_agent"
 
+// SubAgentCallsMetaKey is the sub_agent tool output Metadata key carrying the
+// child's tool calls as JSON ([]provider.SubAgentCall). buildToolResultTurn
+// moves it onto the result turn's SubAgentCalls; it never enters Content.
+const SubAgentCallsMetaKey = "sub_agent_tool_calls"
+
 // MaxSubAgentDepth caps recursive sub-agent spawning. The top-level
 // orchestrator runs at depth 0; the first sub-agent runs at depth 1; a child
 // of that sub-agent would run at depth 2 and so on. Attempts to spawn beyond
@@ -219,3 +224,41 @@ func BuildSubAgentSeedConversation(p *SubAgentParams) []provider.ConversationTur
 // NewSubAgentOrchID returns a UUID for a child orchestrator. Centralised so
 // tests can swap it out if needed.
 var NewSubAgentOrchID = func() string { return uuid.New().String() }
+
+// cancelledResultPrefix starts the synthetic result CloseDanglingToolCalls
+// appends ("[error kind=cancelled] <note>").
+const cancelledResultPrefix = "[error kind=cancelled]"
+
+// SubAgentCallsFromConversation lists the tool calls recorded in a child
+// orchestrator's conversation, in call order: every assistant ToolCalls entry,
+// matched to its result turn by ToolCallID. A call with no result turn (the
+// child stopped mid-tool) has Ended false. A nested sub_agent call carries the
+// SubAgentCalls of its own result turn, so the list is recursive.
+func SubAgentCallsFromConversation(conv []provider.ConversationTurn) []provider.SubAgentCall {
+	results := make(map[string]*provider.ConversationTurn)
+	for i := range conv {
+		if conv[i].Role == "tool" && conv[i].ToolCallID != "" {
+			results[conv[i].ToolCallID] = &conv[i]
+		}
+	}
+	var calls []provider.SubAgentCall
+	for _, t := range conv {
+		if t.Role != "assistant" {
+			continue
+		}
+		for _, tc := range t.ToolCalls {
+			c := provider.SubAgentCall{ID: tc.ID, Name: tc.Name, Title: stepTitle(tc.Name, tc.Input)}
+			if r, ok := results[tc.ID]; ok {
+				c.Ended = true
+				c.IsError = r.IsError
+				c.Interrupted = strings.HasPrefix(r.Content, cancelledResultPrefix)
+				c.Calls = r.SubAgentCalls
+				if tc.Name == SubAgentToolName && r.Origin != tc.Name {
+					c.OrchestratorID = r.Origin // set from sub_agent_id by buildToolResultTurn
+				}
+			}
+			calls = append(calls, c)
+		}
+	}
+	return calls
+}

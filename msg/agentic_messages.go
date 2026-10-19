@@ -369,11 +369,15 @@ type MsgApprovalRequest struct {
 
 // MsgApprovalResponse carries the user's decision back to the orchestrator.
 type MsgApprovalResponse struct {
-	RequestID        string           `json:"request_id"`
-	Decision         ApprovalDecision `json:"decision"`
-	Reason           string           `json:"reason,omitempty"`
-	ChoiceIdx        int              `json:"choice_idx,omitempty"`
-	RespondingPaneID string           `json:"responding_pane_id,omitempty"`
+	RequestID string           `json:"request_id"`
+	Decision  ApprovalDecision `json:"decision"`
+	Reason    string           `json:"reason,omitempty"`
+	// ChoiceIdx is the zero-based index into the request's Choices, meaningful
+	// only with DecisionChoiceSelected. Only ask_user's question requests carry
+	// Choices, and ask_user is its consumer; a gate refuses it (F-47). Index 0
+	// is omitted on the wire and decodes back to 0.
+	ChoiceIdx        int    `json:"choice_idx,omitempty"`
+	RespondingPaneID string `json:"responding_pane_id,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

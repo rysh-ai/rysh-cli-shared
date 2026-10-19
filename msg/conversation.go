@@ -104,6 +104,12 @@ type ConversationMessage struct {
 	SubjectToShare bool   `json:"subject_to_share,omitempty"`
 	Role           string `json:"role,omitempty"`      // multi-party: visitor, assistant, human, system
 	Streaming      bool   `json:"streaming,omitempty"` // true = partial chunk of an in-progress answer
+	// ToolChrome marks agent working output — a "⏺ tool(…)" header, its
+	// "⎿ ✓ N lines" result branch, a tool error, a diff — as opposed to answer
+	// text. Operators' terminals show it; customer-facing surfaces (a chatbot
+	// widget, a channel reply, the visitor transcript) drop it (E-59). Set by
+	// the orchestrator, which is the last place that knows the difference.
+	ToolChrome bool `json:"tool_chrome,omitempty"`
 
 	// Origin records mirroring provenance: set when this message is a remote
 	// tab/pane's output being mirrored into a local (subscriber) pane, so the

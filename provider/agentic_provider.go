@@ -113,6 +113,39 @@ type ConversationTurn struct {
 	// existed — treat empty as "unknown", never as "mine".
 	ProviderName string `json:"provider_name,omitempty"`
 	Model        string `json:"model,omitempty"`
+
+	// SubAgentCalls is set only on the tool-result turn of a sub_agent call:
+	// the tool calls the child orchestrator made, in order, each nested call
+	// carrying its own children. It is an AUDIT record for consumers that
+	// account for every tool call of a turn (the meeting audit ledger) — the
+	// child's steps otherwise reach them only over the asynchronous step
+	// stream. It is never rendered into a provider request: the model sees
+	// exactly the Content it saw before this field existed.
+	//
+	// In-process only (json:"-"), like MsgOrchestratorDone.Conversation: the
+	// audit reconciles from the orchestrator's in-process result, so the
+	// field is never persisted (session KV), restored, or sent over NATS
+	// (##hop fork) — the child calls' titles carry tool targets that none of
+	// those flows carried before.
+	SubAgentCalls []SubAgentCall `json:"-"`
+}
+
+// SubAgentCall is one tool call a sub-agent made, as recorded in its final
+// conversation. Ended is true when the conversation holds the call's result
+// turn; IsError mirrors that result turn, and Interrupted marks the synthetic
+// "[error kind=cancelled]" result CloseDanglingToolCalls appends for a call
+// cut off by an interrupt (it may never have run). For a nested sub_agent
+// call, OrchestratorID is the grandchild orchestrator (the OrchestratorID on
+// its step events) and Calls holds that orchestrator's calls.
+type SubAgentCall struct {
+	ID             string         `json:"id"`
+	Name           string         `json:"name"`
+	Title          string         `json:"title"`
+	IsError        bool           `json:"is_error"`
+	Ended          bool           `json:"ended"`
+	Interrupted    bool           `json:"interrupted,omitempty"`
+	OrchestratorID string         `json:"orchestrator_id,omitempty"`
+	Calls          []SubAgentCall `json:"calls,omitempty"`
 }
 
 // ProducedBy reports whether this turn was written by the given provider/model
@@ -665,7 +698,14 @@ func (c *ClaudeAgenticProvider) newAgenticRequest(
 		// re-sent on every loop iteration, so caching that prefix is the main
 		// cost/latency win; the trailing breakpoint lets the growing
 		// conversation be cached incrementally across turns.
-		systemField = buildSystemBlocks(systemPrompt)
+		// buildSystemBlocks returns a typed-nil []systemBlock for an empty prompt.
+		// Assigning that to systemField (interface{}) makes the interface non-nil,
+		// so `System … omitempty` would NOT drop it and it marshals as
+		// "system": null → Anthropic 400. Only assign when non-nil so prompt-less
+		// callers (e.g. the session summarizer) omit the field entirely.
+		if blocks := buildSystemBlocks(systemPrompt); blocks != nil {
+			systemField = blocks
+		}
 		applyToolCacheBreakpoint(toolDefs)
 		applyTrailingMessageCacheBreakpoint(messages)
 	} else if systemPrompt != "" {

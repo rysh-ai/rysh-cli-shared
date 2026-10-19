@@ -64,6 +64,19 @@ func builtinDetectors() []Detector {
 			prefix:      "AIza",
 			confidence:  0.95,
 		},
+		// Google OAuth access tokens ("ya29.…", e.g. gcloud auth
+		// print-access-token). The tail is base64url plus '.', because
+		// metadata-server / service-account tokens are dotted
+		// ("ya29.c.<…>"); it may not END in '.', so a sentence's full stop
+		// stays outside the span. Higher confidence than envkv/bearer, which
+		// claim the identical span on "…TOKEN=ya29.…" / "Bearer ya29.…".
+		&regexDetector{
+			name:        "gcp-oauth",
+			re:          regexp.MustCompile(`\b(ya29\.)[0-9A-Za-z_\-.]{19,}[0-9A-Za-z_\-]`),
+			prefixGroup: 1,
+			prefix:      "ya29.",
+			confidence:  0.95,
+		},
 		// AWS access key IDs.
 		&regexDetector{
 			name:        "aws",
