@@ -45,4 +45,7 @@ func RegisterAgenticCodecs(r *CodecRegistry) {
 	r.Register(TagSetRunBudget, "*msg.MsgSetRunBudget", jsonDecoder[MsgSetRunBudget]())
 	r.Register(TagGetRunStatus, "*msg.MsgGetRunStatus", jsonDecoder[MsgGetRunStatus]())
 	r.Register(TagRunStatusReply, "*msg.MsgRunStatusReply", jsonDecoder[MsgRunStatusReply]())
+
+	// Per-pane agent profile: system prompt + tool allow-list (design 093 H1)
+	r.Register(TagSetPaneAgentProfile, "*msg.MsgSetPaneAgentProfile", jsonDecoder[MsgSetPaneAgentProfile]())
 }

@@ -49,6 +49,9 @@ const (
 	// of an LLM execution actor (##auto <kind> runs). Request/reply.
 	TagGetRunStatus   = "MsgGetRunStatus"
 	TagRunStatusReply = "MsgRunStatusReply"
+	// TagSetPaneAgentProfile installs (or clears) a pane's agent profile: its
+	// own system prompt and a strict tool allow-list (design 093 §12.3 H1).
+	TagSetPaneAgentProfile = "MsgSetPaneAgentProfile"
 )
 
 // ---------------------------------------------------------------------------
@@ -607,4 +610,30 @@ type MsgMemoryStateUpdate struct {
 type MsgReloadPrompts struct {
 	SystemPrompt    string `json:"system_prompt"`
 	EmailGovernance string `json:"email_governance,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Pane agent profile (design 093 §12.3 H1)
+// ---------------------------------------------------------------------------
+
+// MsgSetPaneAgentProfile gives one pane's LLM-execution actor its own agent
+// profile, replacing the session defaults for that pane only:
+//
+//   - AllowTools non-empty: every turn offers ONLY these tools, looked up by
+//     name in the pane's registry (and its opt-in tools). A name that resolves
+//     to no tool is ignored and logged, never an error — the allow-list is a
+//     ceiling, not a demand. A tool not on the list is neither offered to the
+//     model nor executable: the orchestrator dispatches through the filtered
+//     registry only, so a hallucinated call comes back "unknown tool".
+//   - SystemPrompt non-empty: it replaces the session's default coding-agent
+//     prompt for this pane. A fixed rysh preamble (ProfilePreamble) always
+//     stays in front of it, so a profile can narrow behaviour but cannot drop
+//     rysh's own safety text.
+//
+// An empty message (both fields empty) restores the defaults. The message is
+// state, not an event: the host re-sends it whenever the pane's actor is
+// (re)created, e.g. after a daemon restart, before the first turn.
+type MsgSetPaneAgentProfile struct {
+	SystemPrompt string   `json:"system_prompt,omitempty"`
+	AllowTools   []string `json:"allow_tools,omitempty"`
 }

@@ -43,6 +43,16 @@ type LLMPromptExecutionActor struct {
 	session      *SessionMemory
 	systemPrompt string
 
+	// Pane agent profile (MsgSetPaneAgentProfile, design 093 H1). Empty =
+	// session defaults. profileTools is the allow-list (normalized: trimmed,
+	// deduplicated, order kept); profilePrompt replaces systemPrompt behind
+	// ProfilePreamble. optInTools holds tools that exist ONLY for profiles
+	// that name them (e.g. the family coordination tools): a pane without a
+	// profile never sees them, so its default tool set is unchanged.
+	profileTools  []string
+	profilePrompt string
+	optInTools    *tools.ToolRegistry
+
 	// Active orchestrator
 	activeOrch   *actor.PID
 	activeOrchID string
@@ -194,6 +204,12 @@ type LLMPromptExecutionActor struct {
 	// host (rysh-cli) builds the closure. Nil → no env block is appended.
 	envBlockProvider func() string
 
+	// recallProvider / turnRecall: per-turn auto-recall (design 010 §3 S5).
+	// turnRecall is set at the start of each user turn and only ever reaches
+	// the system prompt, never session memory.
+	recallProvider func(ctx context.Context, prompt string) string
+	turnRecall     string
+
 	// scopeResolver, when set, maps a prompt's ScopeHint to the parent registry
 	// this actor's tool registry should chain to for that run (the invoking
 	// pane's scope chain). Evaluated per prompt so an agent inherits the scope of
@@ -222,6 +238,29 @@ func (a *LLMPromptExecutionActor) SetCwdResolver(fn func() string) { a.cwdResolv
 // SetEnvBlockProvider installs a per-turn environment-block provider appended
 // to the effective system prompt before each prompt. Pass nil to disable.
 func (a *LLMPromptExecutionActor) SetEnvBlockProvider(fn func() string) { a.envBlockProvider = fn }
+
+// recallTimeout bounds one turn's recall, so a slow or absent embedder delays
+// a prompt by at most this much (and then the turn simply has no recall).
+const recallTimeout = 2 * time.Second
+
+// SetRecallProvider installs per-turn recall (design 010 §3 S5, auto-recall):
+// fn gets the turn's (already sanitized) prompt and returns a block for this
+// turn's system prompt, or "". It is never written to the transcript.
+func (a *LLMPromptExecutionActor) SetRecallProvider(fn func(ctx context.Context, prompt string) string) {
+	a.recallProvider = fn
+}
+
+// prepareRecall computes this turn's recall block. Every turn replaces the
+// previous one, so recall never carries over to an unrelated prompt.
+func (a *LLMPromptExecutionActor) prepareRecall(prompt string) {
+	a.turnRecall = ""
+	if a.recallProvider == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), recallTimeout)
+	defer cancel()
+	a.turnRecall = a.recallProvider(ctx, prompt)
+}
 
 // SetScopeResolver installs a per-prompt scope resolver. Given a prompt's
 // ScopeHint it returns the parent registry this actor's tool registry should
@@ -370,6 +409,9 @@ func (a *LLMPromptExecutionActor) Receive(ctx actor.Context) {
 		}
 		slog.Info("agentic: prompts reloaded", "pane", a.paneID)
 
+	case *msg.MsgSetPaneAgentProfile:
+		a.handleSetPaneAgentProfile(m)
+
 	case *msg.MsgRestoreConversation:
 		// Only adopt an external restore when it adds turns we don't have:
 		// the actor self-restores from KV on Started, and clobbering that
@@ -413,6 +455,8 @@ func (a *LLMPromptExecutionActor) Receive(ctx actor.Context) {
 			a.handleGetGroundingState(m)
 		case *msg.MsgGetRunStatus:
 			a.handleGetRunStatus(m)
+		case *msg.MsgSetPaneAgentProfile:
+			a.handleSetPaneAgentProfile(inner)
 		case *msg.MsgRestoreConversation:
 			if len(inner.Conversation) > a.session.Len() {
 				a.session.Replace(inner.Conversation)
@@ -565,6 +609,9 @@ func (a *LLMPromptExecutionActor) startPrompt(ctx actor.Context, m *msg.MsgAgent
 	// and Content becomes a leading text block.
 	a.session.AppendUserTurn(m.Prompt, m.ContentBlocks)
 
+	// Auto-recall for this turn, from the sanitized prompt (design 010 §3 S5).
+	a.prepareRecall(m.Prompt)
+
 	// Trim + heal both ends of the window (head: no orphaned tool_result;
 	// tail: no unanswered tool_use from an interrupted run).
 	a.session.Bound()
@@ -580,7 +627,10 @@ func (a *LLMPromptExecutionActor) startPrompt(ctx actor.Context, m *msg.MsgAgent
 	}
 
 	// Build effective system prompt: base prompt + memory context (if available).
+	// A pane agent profile swaps the base prompt (behind ProfilePreamble) and
+	// narrows the tool set to its allow-list (design 093 H1).
 	effectivePrompt := a.buildEffectiveSystemPrompt()
+	turnTools := a.turnTools()
 
 	// Spawn orchestrator
 	orchID := uuid.New().String()
@@ -604,7 +654,7 @@ func (a *LLMPromptExecutionActor) startPrompt(ctx actor.Context, m *msg.MsgAgent
 		a.pub,
 		a.nc,
 		a.legProvider(),
-		a.tools,
+		turnTools,
 		a.session.Turns(),
 		effectivePrompt,
 		a.autoApproved,
@@ -642,7 +692,7 @@ func (a *LLMPromptExecutionActor) startPrompt(ctx actor.Context, m *msg.MsgAgent
 	// finalizer/takeover leg skips it: it continues an already-grounded
 	// conversation and must spend its reserved budget on wrapping up, not on
 	// re-earning tool access through the grounding gate.
-	if mode := groundingModeForLegSticky(a.groundingMode, a.finalizerPhase, a.sessionGrounded); mode != "" {
+	if mode := a.profileGroundingMode(groundingModeForLegSticky(a.groundingMode, a.finalizerPhase, a.sessionGrounded)); mode != "" {
 		orch.SetGroundingMode(mode)
 	}
 	// Auto-continue: cap this leg's wall-clock at the time remaining to the
@@ -1149,13 +1199,23 @@ func (a *LLMPromptExecutionActor) persistConversation() {
 // `cd`; memory entries, when present, are appended after it.
 func (a *LLMPromptExecutionActor) buildEffectiveSystemPrompt() string {
 	sp := a.systemPrompt
-	if a.envBlockProvider != nil {
+	if a.profilePrompt != "" {
+		// A profiled pane (design 093 H1) gets its own prompt behind the fixed
+		// rysh preamble, and no env block: the env block describes the working
+		// directory, git and layout for a coding agent with file and shell
+		// tools, which a profiled pane does not have (and should not be told
+		// about). Memory and recall still follow, as for any pane.
+		sp = ProfilePreamble + "\n\n" + a.profilePrompt
+	} else if a.envBlockProvider != nil {
 		if env := a.envBlockProvider(); env != "" {
 			sp = sp + "\n\n" + env
 		}
 	}
 	if a.memoryState != nil && len(a.memoryState.Entries) > 0 {
 		sp = sp + "\n" + msg.FormatMemoryForPrompt(a.memoryState)
+	}
+	if a.turnRecall != "" {
+		sp = sp + "\n\n" + a.turnRecall
 	}
 	return sp
 }

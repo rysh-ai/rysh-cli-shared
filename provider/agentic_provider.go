@@ -8,9 +8,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -368,6 +370,26 @@ func IsInvalidRequestErr(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "invalid_request_error") || strings.Contains(msg, "HTTP 400")
 }
+
+// IsAuthErr reports whether an API error is a rejected credential (HTTP 401)
+// or a key without access (HTTP 403). Like IsInvalidRequestErr it is permanent
+// for the run — the same key gets the same answer — so callers fail fast: the
+// run loop used to retry it to its iteration budget, 2 s apart, and the owner
+// of a chat assistant with a bad key heard nothing for minutes (E33). Matches
+// the OpenAI-compatible typed status error and the Claude error strings
+// ("…: authentication_error (HTTP 401): …", "…: HTTP 403: …").
+func IsAuthErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var he *openaiHTTPError
+	if errors.As(err, &he) {
+		return he.status == http.StatusUnauthorized || he.status == http.StatusForbidden
+	}
+	return authErrPattern.MatchString(err.Error())
+}
+
+var authErrPattern = regexp.MustCompile(`authentication_error|permission_error|HTTP 40[13]\b`)
 
 // outputConfig renders the request output_config block, or nil when no
 // effort override is set (keeping the request body byte-identical to before).

@@ -464,6 +464,26 @@ func (o *OrchestratorActor) Receive(ctx actor.Context) {
 // runLoop is the main agentic loop. It runs in a goroutine and communicates
 // with the actor via NATS messages (publishing output/status) and through
 // the parent context for cancellation.
+// nonRetryableNotice reports whether a provider error is permanent for this
+// run, and the line the run ends with:
+//
+//   - HTTP 400 invalid_request errors are deterministic: the same conversation
+//     re-sent yields the same rejection, so looping silently burns the run's
+//     whole iteration/token budget on identical failures (observed: 8+
+//     media-type 400s in one run).
+//   - HTTP 401/403 is a rejected or unauthorised API key: the same key gets
+//     the same answer. Retrying it kept a chat assistant with a bad key silent
+//     for minutes before its owner heard anything (E33).
+func nonRetryableNotice(err error) (string, bool) {
+	switch {
+	case provider.IsInvalidRequestErr(err):
+		return "[request rejected as invalid (HTTP 400) — not retrying; fix the request payload and resume]\n", true
+	case provider.IsAuthErr(err):
+		return "[the provider rejected the API key (HTTP 401/403) — not retrying; check the provider's API key and resume]\n", true
+	}
+	return "", false
+}
+
 func (o *OrchestratorActor) runLoop(ctx actor.Context) {
 	defer func() {
 		// A paused/interrupted run may have stopped between an assistant
@@ -630,13 +650,10 @@ func (o *OrchestratorActor) runLoop(ctx actor.Context) {
 			}
 			o.emitOutput("error", fmt.Sprintf("\n[LLM error: %v]\n", err))
 			o.errors = append(o.errors, err.Error())
-			// HTTP 400 invalid_request errors are deterministic: the same
-			// conversation re-sent yields the same rejection, so looping here
-			// silently burns the run's whole iteration/token budget on
-			// identical failures (observed: 8+ media-type 400s in one run).
-			// Fail the turn once with a clear message instead.
-			if provider.IsInvalidRequestErr(err) {
-				o.emitOutput("error", "[request rejected as invalid (HTTP 400) — not retrying; fix the request payload and resume]\n")
+			// Errors that are permanent for this run (nonRetryableNotice) end
+			// it at once with a clear message instead of looping.
+			if notice, ok := nonRetryableNotice(err); ok {
+				o.emitOutput("error", notice)
 				o.phase = PhaseError
 				return
 			}
@@ -982,6 +999,16 @@ func (o *OrchestratorActor) buildToolResultTurn(tc provider.ToolCallRequest, res
 }
 
 // executeTool runs a single tool call with approval checks.
+// hasTool reports whether this run's registry offers name. Gates the
+// pseudo-tool intercepts in executeTool (e20 C-1).
+func (o *OrchestratorActor) hasTool(name string) bool {
+	if o.tools == nil {
+		return false
+	}
+	_, ok := o.tools.Get(name)
+	return ok
+}
+
 func (o *OrchestratorActor) executeTool(ctx actor.Context, tc provider.ToolCallRequest) *tools.ToolOutput {
 	// Loop detection: block repeated identical tool calls.
 	if o.detectLoop(tc.Name, tc.Input) {
@@ -994,7 +1021,14 @@ func (o *OrchestratorActor) executeTool(ctx actor.Context, tc provider.ToolCallR
 	// sub_agent below): understood=true opens the gate; understood=false
 	// surfaces a question and schedules an awaiting-info pause. The tool's
 	// registered Execute is intentionally never reached for this name.
-	if tc.Name == GroundingToolName {
+	//
+	// Both pseudo-tool intercepts run ONLY when this turn's registry holds the
+	// name (e20 C-1, design 093 H1): a pane agent profile's allow-list builds
+	// a registry without them, and a name-based intercept ahead of the lookup
+	// would let an un-offered call through — sub_agent spawning a child run
+	// with a model-chosen prompt and no profile preamble. Off-list, the call
+	// falls through to the ordinary "unknown tool" result below.
+	if tc.Name == GroundingToolName && o.hasTool(tc.Name) {
 		return o.handleGroundingReport(tc)
 	}
 
@@ -1013,7 +1047,7 @@ func (o *OrchestratorActor) executeTool(ctx actor.Context, tc provider.ToolCallR
 	// OrchestratorActor with its own context window and returns only the
 	// child's summary to the parent conversation. The tool's registered
 	// Execute is intentionally never reached for this name.
-	if tc.Name == SubAgentToolName {
+	if tc.Name == SubAgentToolName && o.hasTool(tc.Name) {
 		return o.handleSubAgent(ctx, tc)
 	}
 

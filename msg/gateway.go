@@ -116,6 +116,11 @@ type GatewayLeaseRequest struct {
 	WantTokens int64  `json:"want_tokens"`
 	DaemonID   string `json:"daemon_id"`
 	SpentSince int64  `json:"spent_since"`
+	// SpentSinceMicroUSD is the same piggyback in money, for the spend cap
+	// (root-order-044 #8). The server takes the larger of it and its own
+	// rollup, exactly as it does for tokens. Omitted when zero, so an old
+	// server sees the request it always saw.
+	SpentSinceMicroUSD int64 `json:"spent_since_micro_usd,omitempty"`
 }
 
 // GatewayLeaseReply is the grant.
@@ -135,6 +140,69 @@ type GatewayLeaseReply struct {
 	// ceiling + ActiveDaemons × MaxLeaseTokens (023 §4.2).
 	ActiveDaemons  int   `json:"active_daemons"`
 	MaxLeaseTokens int64 `json:"max_lease_tokens"`
+
+	// Refusal names which limit bound when GrantedTokens is 0: "" (none, or an
+	// old server), GatewayRefusalTokenCeiling or GatewayRefusalSpendCap. The
+	// daemon refuses on GrantedTokens == 0 either way; Refusal only changes the
+	// words, so an old client still fails closed on a spend-capped workspace.
+	Refusal string `json:"refusal,omitempty"`
+	// The spend cap (root-order-044 #8), present only when the workspace has
+	// one. The figures are rysh's ESTIMATE from its price table, not a
+	// provider invoice. The cap can be overshot by the leases already out:
+	// ActiveDaemons × MaxLeaseTokens at the dearest model's price.
+	SpendCapMicroUSD    int64  `json:"spend_cap_micro_usd,omitempty"`
+	SpentPeriodMicroUSD int64  `json:"spent_period_micro_usd,omitempty"`
+	SpendCapPeriod      string `json:"spend_cap_period,omitempty"`
+}
+
+// Lease refusal reasons (GatewayLeaseReply.Refusal).
+const (
+	GatewayRefusalTokenCeiling = "token_ceiling"
+	GatewayRefusalSpendCap     = "spend_cap"
+)
+
+// ---------------------------------------------------------------------------
+// Spend cap (HTTP): GET/PUT/DELETE /api/workspaces/{wsID}/gateway/spend-cap
+// ---------------------------------------------------------------------------
+
+// Spend cap periods. UTC calendar boundaries only: a cap that reset at each
+// viewer's local midnight would have no single answer to "how much this month".
+const (
+	SpendCapPeriodDay   = "day"
+	SpendCapPeriodMonth = "month"
+)
+
+// ValidSpendCapPeriod reports whether p is a period the server accepts. Exact
+// match only: "Month" or " month" are refused, not normalised.
+func ValidSpendCapPeriod(p string) bool {
+	return p == SpendCapPeriodDay || p == SpendCapPeriodMonth
+}
+
+// SpendCapPeriodBounds returns the UTC period [start, end) containing now.
+// Exported because the server's sum and the client's wording must agree on
+// when a period starts. ok is false for an unknown period.
+func SpendCapPeriodBounds(period string, now time.Time) (start, end time.Time, ok bool) {
+	u := now.UTC()
+	switch period {
+	case SpendCapPeriodDay:
+		start = time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+		return start, start.AddDate(0, 0, 1), true
+	case SpendCapPeriodMonth:
+		start = time.Date(u.Year(), u.Month(), 1, 0, 0, 0, 0, time.UTC)
+		return start, start.AddDate(0, 1, 0), true
+	}
+	return time.Time{}, time.Time{}, false
+}
+
+// GatewaySpendCap is the spend-cap document. PUT takes Period and CapMicroUSD;
+// GET also fills SpentMicroUSD (the estimate for the current period) and the
+// period bounds.
+type GatewaySpendCap struct {
+	Period        string    `json:"period"`
+	CapMicroUSD   int64     `json:"cap_micro_usd"`
+	SpentMicroUSD int64     `json:"spent_micro_usd,omitempty"`
+	PeriodStart   time.Time `json:"period_start,omitzero"`
+	PeriodEnd     time.Time `json:"period_end,omitzero"`
 }
 
 // GatewayLeaseTTL is how long a grant is valid. Short on purpose: a dead
