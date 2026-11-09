@@ -73,6 +73,13 @@ type MsgAgenticPrompt struct {
 	// to this package; interpreted by the host's scope resolver. Empty for panes
 	// (their registry is fixed) and for agents invoked outside any pane.
 	ScopeHint string `json:"scope_hint,omitempty"`
+	// Queue makes a prompt that arrives while a run is in flight wait behind
+	// it, in arrival order, instead of cancelling it (an ordinary prompt keeps
+	// last-prompt-wins). Deliveries set it: the courier and `rysh family
+	// serve` each check the agent is idle and then send, and without it one
+	// could cancel the other's run in the gap (QA-36). Older executors ignore
+	// the field.
+	Queue bool `json:"queue,omitempty"`
 }
 
 // MsgAgenticCancel interrupts any in-flight orchestrator. The run is PAUSED,
@@ -315,11 +322,15 @@ type MsgAgenticOutput struct {
 
 // MsgAgenticStatus updates the agentic phase displayed in the status bar.
 type MsgAgenticStatus struct {
-	OrchestratorID string   `json:"orchestrator_id"`
-	Phase          string   `json:"phase"` // "planning", "executing", "waiting_approval", "done", "error"
-	Iteration      int      `json:"iteration"`
-	MaxIterations  int      `json:"max_iterations"`
-	ActiveTools    []string `json:"active_tools,omitempty"`
+	OrchestratorID string `json:"orchestrator_id"`
+	// RequestID is the RequestID of the prompt this run answers, on the run's
+	// first ("planning") status only, so a sender can tell its own run from
+	// one queued ahead of it. Empty from older executors.
+	RequestID     string   `json:"request_id,omitempty"`
+	Phase         string   `json:"phase"` // "planning", "executing", "waiting_approval", "done", "error"
+	Iteration     int      `json:"iteration"`
+	MaxIterations int      `json:"max_iterations"`
+	ActiveTools   []string `json:"active_tools,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

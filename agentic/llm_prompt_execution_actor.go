@@ -67,6 +67,10 @@ type LLMPromptExecutionActor struct {
 	// sees the full context of what just happened. Last-prompt-wins: a newer
 	// prompt overwrites an older queued one.
 	pendingPrompt *msg.MsgAgenticPrompt
+	// queuedPrompts are Queue prompts (deliveries) that arrived while a run
+	// was in flight: they never cancel it and start in arrival order after
+	// it, after any pendingPrompt (QA-36). Bounded by maxQueuedPrompts.
+	queuedPrompts []*msg.MsgAgenticPrompt
 
 	// Auto-continue run budget (##web auto long runs). When armed, a run that
 	// pauses on the per-leg iteration/wall-clock cap is resumed automatically
@@ -562,6 +566,18 @@ func (a *LLMPromptExecutionActor) handlePrompt(ctx actor.Context, m *msg.MsgAgen
 	// ctx.Stop): the runLoop's deferred MsgOrchestratorDone must still reach us
 	// so its work is captured. Last-prompt-wins: overwrite any older queued
 	// prompt.
+	if a.activeOrch != nil && m.Queue {
+		if len(a.queuedPrompts) >= maxQueuedPrompts {
+			slog.Warn("agentic: delivery queue full; prompt refused", "pane", a.paneID, "request", m.RequestID)
+			if a.pub != nil {
+				a.emitOutput(a.activeOrchID, "error", fmt.Sprintf("A delivery was refused: %d are already waiting for this agent's current run.", maxQueuedPrompts))
+			}
+			return
+		}
+		a.queuedPrompts = append(a.queuedPrompts, m)
+		slog.Info("agentic: delivery queued behind in-flight run", "pane", a.paneID, "waiting", len(a.queuedPrompts))
+		return
+	}
 	if a.activeOrch != nil {
 		a.pendingPrompt = m
 		if a.cancelFn != nil {
@@ -573,6 +589,24 @@ func (a *LLMPromptExecutionActor) handlePrompt(ctx actor.Context, m *msg.MsgAgen
 	}
 
 	a.startPrompt(ctx, m)
+}
+
+// maxQueuedPrompts bounds the deliveries waiting behind one run.
+const maxQueuedPrompts = 32
+
+// nextPrompt takes the prompt to start when a run ends: a superseding
+// (ordinary) prompt first, then the queued deliveries in arrival order.
+func (a *LLMPromptExecutionActor) nextPrompt() *msg.MsgAgenticPrompt {
+	if p := a.pendingPrompt; p != nil {
+		a.pendingPrompt = nil
+		return p
+	}
+	if len(a.queuedPrompts) > 0 {
+		p := a.queuedPrompts[0]
+		a.queuedPrompts = a.queuedPrompts[1:]
+		return p
+	}
+	return nil
 }
 
 // startPrompt appends the user turn and spawns an orchestrator for it. The
@@ -719,8 +753,8 @@ func (a *LLMPromptExecutionActor) startPrompt(ctx actor.Context, m *msg.MsgAgent
 	}
 	a.activeOrch = pid
 
-	// Emit status
-	a.emitStatus(orchID, "planning", 0, maxIter)
+	// Emit status; the first one names the prompt this run answers.
+	a.emitRunStatus(runStatus(orchID, m.RequestID, "planning", 0, maxIter))
 }
 
 // handleCancel interrupts the in-flight run with PAUSE semantics: the
@@ -1077,9 +1111,7 @@ func (a *LLMPromptExecutionActor) handleOrchestratorDone(ctx actor.Context, m *m
 
 	// A prompt queued while this run was in flight now starts — with the run's
 	// work already merged above, so it has full context.
-	if a.pendingPrompt != nil {
-		p := a.pendingPrompt
-		a.pendingPrompt = nil
+	if p := a.nextPrompt(); p != nil {
 		a.session.ClearPause() // the queued prompt supersedes any interrupt checkpoint
 		a.startPrompt(ctx, p)
 		return
@@ -1251,13 +1283,24 @@ func (a *LLMPromptExecutionActor) emitOutput(orchID, outputType, content string)
 	}
 }
 
-func (a *LLMPromptExecutionActor) emitStatus(orchID, phase string, iteration, maxIter int) {
-	_ = a.pub.Send(a.statusSubject, &msg.MsgAgenticStatus{
+// runStatus is a run's status message; requestID is set on its first one.
+func runStatus(orchID, requestID, phase string, iteration, maxIter int) *msg.MsgAgenticStatus {
+	return &msg.MsgAgenticStatus{
 		OrchestratorID: orchID,
+		RequestID:      requestID,
 		Phase:          phase,
 		Iteration:      iteration,
 		MaxIterations:  maxIter,
-	})
+	}
+}
+
+func (a *LLMPromptExecutionActor) emitStatus(orchID, phase string, iteration, maxIter int) {
+	a.emitRunStatus(runStatus(orchID, "", phase, iteration, maxIter))
+}
+
+func (a *LLMPromptExecutionActor) emitRunStatus(st *msg.MsgAgenticStatus) {
+	phase, iteration, maxIter := st.Phase, st.Iteration, st.MaxIterations
+	_ = a.pub.Send(a.statusSubject, st)
 	// Also update pane status
 	paneStatus := msg.T("pane", a.paneID, "status")
 	statusText := fmt.Sprintf("[agentic] %s", phase)
